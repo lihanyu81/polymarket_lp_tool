@@ -81,14 +81,15 @@ sudo apt install python3.12-venv
 
 ## 环境变量
 
-在**项目根目录** `.env`（勿提交；已 `.gitignore`）：
+1. 复制示例文件并编辑（**不要**把真实 `.env` 提交到 Git）：
 
-```env
-PRIVATE_KEY=...
-POLYMARKET_FUNDER=...
+```bash
+cp .env.example .env
 ```
 
-可选：`POLYMARKET_SIGNATURE_TYPE`、`POLYMARKET_HOST`、`POLYMARKET_CHAIN_ID`。
+2. 在 `.env` 中至少填写 **`PRIVATE_KEY`（或 `POLYMARKET_PRIVATE_KEY`）** 与 **`POLYMARKET_FUNDER`**。其余变量见仓库根目录 **`.env.example`** 内注释。
+
+`.env` 已在 `.gitignore` 中忽略。
 
 ### 与主循环强相关（`PASSIVE_*`）
 
