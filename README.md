@@ -145,6 +145,48 @@ python run_passive_bot.py
 python -m passive_liquidity.main_loop
 ```
 
+### 使用 tmux（SSH 断开后仍运行）
+
+在远程服务器上若直接在前台运行，**SSH 断开或终端关闭**时，Shell 会向子进程发信号，进程通常会退出。用 **tmux**（或 screen）把程序跑在**持久会话**里，断线后程序继续跑，下次 SSH 再连上去即可查看日志或停止。
+
+**安装**（若系统没有 `tmux`）：
+
+```bash
+sudo apt update && sudo apt install -y tmux
+```
+
+**典型用法**：
+
+1. 登录 SSH 后进入项目目录并激活虚拟环境（与上文一致）。
+2. 新建一个命名会话（名称可自定，例如 `poly`）：
+
+```bash
+tmux new -s poly
+```
+
+3. 在 tmux 窗口里启动程序，例如：
+
+```bash
+cd polymarket_lp_tool
+source .venv/bin/activate
+python run_passive_bot.py
+```
+
+4. **断开会话但保持程序运行**：按 **`Ctrl+b`**，松开后按 **`d`**（detach）。此时可安全关闭 SSH；程序在服务器上继续执行。
+5. **再次 SSH 登录后接回会话**：
+
+```bash
+tmux attach -t poly
+```
+
+若忘记会话名，可先列出：
+
+```bash
+tmux ls
+```
+
+再接回：`tmux attach -t <会话名>`。在 tmux 内用 **`Ctrl+c`** 可停止程序；退出 tmux 窗口可输入 `exit` 或按 **`Ctrl+d`**。
+
 ## 免责声明
 
 版本属于 `@臭臭Panda`。非官方产品；不保证激励计分或盈亏。请自行遵守服务条款与所在地法规（含 [地理限制](https://docs.polymarket.com/api-reference/geoblock)）。实盘前请小额测试。
