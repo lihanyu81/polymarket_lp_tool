@@ -11,7 +11,7 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 1. **白名单**：若设置 `PASSIVE_TOKEN_WHITELIST`，则仅以环境变量为准（运行中不随挂单变化）。若未设置，则从当前未成交单提取 `token_id`，并默认每 **120 秒**（`PASSIVE_WHITELIST_REFRESH_SEC`）用未成交单刷新，以便启动后新挂的单可被纳入；设为 `0` 则仅在启动时种子一次。
 2. **过滤**：仅管理白名单内订单；若该 `token_id` **已有持仓**（`abs(inventory) > 1e-8`），则**整 token 不处理**（不撤、不改、不进 fill 推断与周期摘要明细）。
-3. **调价**：仅 `passive_liquidity/simple_price_policy.py` 中的 **`decide_simple_price`**（粗 tick / 细 tick；见下文）。**不再**使用 `AdjustmentEngine`、结构性风控、fill risk、按积分微调、按库存调价等旧逻辑（相关文件仍留在仓库，主循环不调用）。
+3. **调价**：仅 `passive_liquidity/simple_price_policy.py` 中的 **`decide_simple_price`**（粗 tick / 细 tick；见下文）。若该 `token_id`+方向在 **Telegram 保存了自定义规则**，或订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`**，则进入 **custom** 分支（规则优先于纯环境自定义）。**不再**使用 `AdjustmentEngine`、结构性风控、fill risk、按积分微调、按库存调价等旧逻辑（相关文件仍留在仓库，主循环不调用）。
 4. **执行**：`OrderManager.apply_decision`（撤单、撤单后延迟、挂单失败可无限重试或限次，由配置决定）。
 5. **可选**：成交推断 Telegram、半点资金摘要、周期性 **band + 盘口深度** 摘要。
 
@@ -43,6 +43,52 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 订单事件与部分 Telegram 文案中，原因码会显示为**中文说明**（`pricing_adjustment_reason_zh`）。
 
+## 自定义调价（Telegram / 环境变量）
+
+在默认粗/细 tick 规则之外，可对**指定订单或整 token+方向**使用固定逻辑（仍由主循环撤单改价，程序不新建首单）。
+
+**生效优先级（同一订单）**
+
+1. 已为该 **`token_id` + `BUY`/`SELL`** 在 Telegram **保存规则** → 使用持久化规则（`custom_pricing_rules.json`，路径可由 **`PASSIVE_CUSTOM_RULES_PATH`** 覆盖；文件已在 `.gitignore` 中忽略）。
+2. 否则，若订单 id 在 **`PASSIVE_CUSTOM_ORDER_IDS`**（逗号分隔，与 CLOB 返回 id 完全一致）→ 使用 **`.env` 里 `PASSIVE_CUSTOM_*`** 默认自定义参数。
+3. 否则 → 上节**默认**粗/细 tick 策略。
+
+**Telegram 交互**（需 **`TELEGRAM_ENABLED=true`** 且 **`TELEGRAM_COMMANDS_ENABLED`** 未设为关闭；命令由 `telegram_command_poller` 轮询处理）
+
+| 命令 | 作用 |
+| --- | --- |
+| **`/set_rule <order_id>`** | 对**当前仍挂单**的订单启动多步配置；粗 tick：输入 N、是否允许最优档、`min_candidate_levels` 等；细 tick：safe 区间与 `target_ratio`。 |
+| **`/get_rule <order_id>`** | 查看该单对应键下已保存规则摘要。 |
+| **`/clear_rule <order_id>`** | 删除该键规则，恢复默认调价。 |
+| **`/cancel_rule_setup`** | 取消进行中的配置会话。 |
+| **`/input <答案>`** | 与逐步回复等价；在**群组隐私模式**下 Bot 收不到纯文字时，用此命令提交**当前步骤**的答案（**一步一条**，勿把多步写在同一条消息里）。 |
+
+**粗 tick 自定义（`pricing_mode=custom` 且 tick 归为粗）**
+
+- 配置正整数 **N**：**N=1** 目标为**对齐后的 mid**；**N=k** 为距 mid **(k−1) 个 tick**、向激励带方向移动（**BUY** 向低价，**SELL** 对称向高价）。例 `tick=0.01`、mid 对齐到 `0.16`：N=1→0.16，N=2→0.15，N=3→0.14。
+- 可选 **不允许挂在最优买/卖价**（与 **`PASSIVE_CUSTOM_COARSE_ALLOW_TOP_OF_BOOK`** 同理）；**`min_candidate_levels`**：激励带与 (0,1) 交集内至少要有足够 tick 档才允许按 N 调价，否则本轮回合保持。
+
+**细 tick 自定义**
+
+- 在 **`PASSIVE_CUSTOM_FINE_SAFE_MIN`～`PASSIVE_CUSTOM_FINE_SAFE_MAX`** 比例带内保持；否则按 **`PASSIVE_CUSTOM_FINE_TARGET_RATIO`** 在带内收放（与 `simple_price_policy._decide_custom_fine` 一致）。
+
+**环境变量一览（`PASSIVE_CUSTOM_*`）**
+
+仅当订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`** 且**该 token+方向没有** Telegram 持久化规则时，下列粗/细参数才作为该单的自定义默认值；Telegram **`/set_rule`** 保存的规则会覆盖同键下的行为，且**不再**读取这些 env 粗/细项（规则里自带一份快照）。
+
+| 变量 | 含义 | 默认（未设置 env 时） |
+| --- | --- | --- |
+| **`PASSIVE_CUSTOM_ORDER_IDS`** | 逗号分隔的 **order id**（与 CLOB 一致）；列在此的订单使用自定义调价（若无持久化规则则用本表以下 env）。 | （空，不启用） |
+| **`PASSIVE_CUSTOM_RULES_PATH`** | 规则 JSON 文件路径；空则使用项目目录下 **`custom_pricing_rules.json`**。 | `custom_pricing_rules.json` |
+| **`PASSIVE_CUSTOM_COARSE_TICK_OFFSET`** | 粗 tick 档位 **N**（正整数）：N=1 对齐 mid，N=k 距 mid 为 (k−1) 个 tick。 | `1` |
+| **`PASSIVE_CUSTOM_COARSE_ALLOW_TOP_OF_BOOK`** | 粗 tick 是否允许目标价落在**最优买/卖档**（`true`/`yes`/`1`/`on` 为允许）。 | `true` |
+| **`PASSIVE_CUSTOM_COARSE_MIN_CANDIDATES`** | 激励带与 (0,1) 交集内至少需要的 **tick 档位数**；不足则本轮回合保持。 | `1` |
+| **`PASSIVE_CUSTOM_FINE_SAFE_MIN`** | 细 tick：`distance_ratio` 安全带下界（与 mid、δ 比例相关）。 | `0.4` |
+| **`PASSIVE_CUSTOM_FINE_SAFE_MAX`** | 细 tick：安全带上界。 | `0.6` |
+| **`PASSIVE_CUSTOM_FINE_TARGET_RATIO`** | 细 tick：带外时趋向的 **目标比例**（0～1）。 | `0.5` |
+
+更细的注释与可选写法见 **`.env.example`**；粗 tick 行为回归见 **`test_simple_price_custom_coarse.py`**。
+
 ## 架构（模块）
 
 | 模块 | 文件 | 职责 |
@@ -57,6 +103,9 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 | **TelegramNotifier** | `passive_liquidity/telegram_notifier.py` | 各类中文通知、运营警告、原因码映射 |
 | **AccountPortfolio** | `passive_liquidity/account_portfolio.py` | CLOB collateral 快照；**总额=API collateral**，不将未成交买单占用加回总额 |
 | **ConfigManager** | `passive_liquidity/config_manager.py` | `PassiveConfig` + 环境变量 |
+| **CustomPricingRulesStore** | `passive_liquidity/custom_pricing_rules_store.py` | Telegram 规则 JSON 读写（按 `token_id`+方向键） |
+| **TelegramRuleSetup** | `passive_liquidity/telegram_rule_setup.py` | `/set_rule` 等多步 FSM 与 `/get_rule`、`/clear_rule` |
+| **TelegramCommandPoller** | `passive_liquidity/telegram_command_poller.py` | 命令与 `/input`；`telegram_live_queries` 提供 `/status`、`/orders`、`/pnl` |
 | **AdjustmentEngine** / **structural_risk** 等 | 遗留代码 | **主循环未使用** |
 
 入口：`run_passive_bot.py`，或 `python -m passive_liquidity.main_loop`。
@@ -90,7 +139,7 @@ sudo apt install python3.12-venv
 cp .env.example .env
 ```
 
-2. 在 `.env` 中至少填写 **`PRIVATE_KEY`（或 `POLYMARKET_PRIVATE_KEY`）** 与 **`POLYMARKET_FUNDER`**。其余变量见仓库根目录 **`.env.example`** 内注释。
+2. 在 `.env` 中至少填写 **`PRIVATE_KEY`（或 `POLYMARKET_PRIVATE_KEY`）** 与 **`POLYMARKET_FUNDER`**。其余变量以仓库根目录 **`.env.example`** 为准：示例已按功能分块注释（**被动监控告警**、**订单成交通知**、**自定义调价**等），可按需删减行，不必与示例逐行一致。
 
 `.env` 已在 `.gitignore` 中忽略。
 
@@ -122,8 +171,16 @@ cp .env.example .env
 | **`TELEGRAM_TOTAL_DEPOSITED_USDC`** | 可选；盈亏参考入账；不设则尝试活动 API 或启动时读数 |
 | **`PASSIVE_TELEGRAM_BAND_SUMMARY`** | 是否发送周期性 **`|价−mid|/δ` + 带内深度** 摘要（默认开） |
 | **`PASSIVE_TELEGRAM_BAND_SUMMARY_SEC`** | 周期间隔（秒），默认 `600`；`≤0` 关闭 |
+| **`TELEGRAM_COMMANDS_ENABLED`** | 未设为 `off`/`0`/`false` 时轮询处理 `/set_rule`、`/input`、`/status` 等（见 `telegram_command_poller.py`） |
 
-另有成交通知相关 `PASSIVE_TELEGRAM_NOTIFY_*`（见 `config_manager.py`）。
+**两类「成交」相关推送（不要混用开关）**
+
+| 变量 | 含义 |
+| --- | --- |
+| **`PASSIVE_ALERT_MONITORING`** | `false` 时关闭的是盘口 **成交活跃度 / 被吃风险** 与 **深度占比** 等**被动监控**告警，**不是**「你自己的订单成交了」。 |
+| **`PASSIVE_TELEGRAM_NOTIFY_FILL`** | 是否在 CLOB 上推断到**订单部分/全部成交**时发 Telegram（`PASSIVE_TELEGRAM_NOTIFY_PARTIAL_FILL` / **`PASSIVE_TELEGRAM_NOTIFY_FULL_FILL`** 可再细分）。 |
+
+若只关监控却仍收到「订单成交」类消息，请将 **`PASSIVE_TELEGRAM_NOTIFY_FILL=false`**（或按需关 partial/full）。启动时若监控已关而成交通知仍开，日志会给出 **WARNING** 提示。
 
 **群组 → 超级群**：Telegram 会更换 `chat_id`。若发消息报 `group chat was upgraded to a supergroup`，请按接口返回的 **`migrate_to_chat_id`** 更新 **`TELEGRAM_CHAT_ID`** 并重启（否则推送与 `/status` 等命令都不会进新群）。
 
