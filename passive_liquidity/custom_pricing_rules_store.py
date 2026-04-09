@@ -48,17 +48,46 @@ class StoredCustomRule:
 
 
 class CustomPricingRulesStore:
-    """Thread-safe in-memory rules with JSON persistence (single-process)."""
+    """Thread-safe in-memory rules with JSON persistence.
+
+    The bot and the web panel are separate processes: both read/write the same
+    file path. On each ``get_rule`` / ``list_keys``, we reload from disk when
+    the file's mtime changed so web (or Telegram in another process) edits take
+    effect without restarting the bot.
+    """
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._lock = threading.RLock()
         self._rules: dict[str, dict[str, Any]] = {}
+        self._disk_mtime: Optional[float] = None
         self._load_unlocked()
+        if self._path.is_file():
+            try:
+                self._disk_mtime = self._path.stat().st_mtime
+            except OSError:
+                self._disk_mtime = None
 
     @property
     def path(self) -> Path:
         return self._path
+
+    def _sync_from_disk_if_changed_unlocked(self) -> None:
+        """Reload JSON if the file changed on disk (call with ``_lock`` held)."""
+        try:
+            mtime = self._path.stat().st_mtime
+        except OSError:
+            self._rules = {}
+            self._disk_mtime = None
+            return
+        if self._disk_mtime is not None and mtime <= self._disk_mtime:
+            return
+        self._load_unlocked()
+        LOG.info("reloaded custom pricing rules from disk: %s", self._path)
+        try:
+            self._disk_mtime = self._path.stat().st_mtime
+        except OSError:
+            self._disk_mtime = None
 
     def _load_unlocked(self) -> None:
         if not self._path.is_file():
@@ -94,6 +123,7 @@ class CustomPricingRulesStore:
     def get_rule(self, token_id: str, side: str) -> Optional[StoredCustomRule]:
         key = stable_rule_key(token_id, side)
         with self._lock:
+            self._sync_from_disk_if_changed_unlocked()
             row = self._rules.get(key)
             if not isinstance(row, dict):
                 return None
@@ -126,6 +156,10 @@ class CustomPricingRulesStore:
         with self._lock:
             self._rules[key] = row
             self._persist_unlocked()
+            try:
+                self._disk_mtime = self._path.stat().st_mtime
+            except OSError:
+                self._disk_mtime = None
         LOG.info("custom rule saved key=%s regime=%s", key, rule.tick_regime)
 
     def clear_rule(self, token_id: str, side: str) -> bool:
@@ -135,9 +169,14 @@ class CustomPricingRulesStore:
                 return False
             del self._rules[key]
             self._persist_unlocked()
+            try:
+                self._disk_mtime = self._path.stat().st_mtime
+            except OSError:
+                self._disk_mtime = None
         LOG.info("custom rule cleared key=%s", key)
         return True
 
     def list_keys(self) -> list[str]:
         with self._lock:
+            self._sync_from_disk_if_changed_unlocked()
             return sorted(self._rules.keys())
