@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,7 +43,7 @@ from passive_liquidity.order_manager import (
     _token_id,
 )
 from passive_liquidity.models import OrderBookSnapshot
-from passive_liquidity.orderbook_fetcher import OrderBookFetcher
+from passive_liquidity.orderbook_fetcher import OrderBookFetcher, resolve_effective_tick_size
 from passive_liquidity.polymarket_ws_market import PolymarketMarketWsThread
 from passive_liquidity.polymarket_ws_state import PolymarketWsHub
 from passive_liquidity.polymarket_ws_user import PolymarketUserWsThread
@@ -400,6 +401,11 @@ def main() -> None:
         config.loop_interval,
         config.monitoring_post_only,
     )
+    if config.default_custom_pricing_from_env:
+        LOG.info(
+            "PASSIVE_DEFAULT_CUSTOM_PRICING enabled: orders without Telegram /set_rule "
+            "use PASSIVE_CUSTOM_* from env (per-token rules still override)"
+        )
 
     error_streak = 0
     fill_tracker = FillNotificationTracker()
@@ -417,6 +423,7 @@ def main() -> None:
         stop=telegram_command_stop,
         rules_store=rules_store,
         book_fetcher=book_fetcher,
+        reward_monitor=reward_monitor,
         default_custom_settings=CustomPricingSettings(
             coarse_tick_offset_from_mid=int(
                 config.custom_coarse_tick_offset_from_mid
@@ -655,6 +662,10 @@ def main() -> None:
                 inv_by_token: dict[str, float] = {}
                 position_skip_logged: set[str] = set()
 
+                # --- Batch inventory: collect unique (token_id, condition_id) ---
+                _inv_pairs_seen: set[str] = set()
+                _inv_pairs: list[tuple[str, str]] = []
+                _whitelisted_orders: list[dict] = []
                 for o in orders:
                     oid = _oid(o)
                     token_id = _token_id(o)
@@ -662,15 +673,20 @@ def main() -> None:
                     if not oid or not token_id or not condition_id:
                         LOG.warning("Skip order with missing id/market/asset: %s", o)
                         continue
-
                     if token_id not in effective_whitelist:
                         continue
+                    _whitelisted_orders.append(o)
+                    if token_id not in _inv_pairs_seen:
+                        _inv_pairs_seen.add(token_id)
+                        _inv_pairs.append((token_id, condition_id))
 
-                    if token_id not in inv_by_token:
-                        inv_by_token[token_id] = risk.get_inventory(
-                            condition_id, token_id
-                        )
-                    inv = inv_by_token[token_id]
+                if _inv_pairs:
+                    inv_by_token = risk.batch_get_inventory(_inv_pairs)
+
+                for o in _whitelisted_orders:
+                    token_id = _token_id(o)
+                    condition_id = _market(o)
+                    inv = inv_by_token.get(token_id, 0.0)
                     if abs(inv) > 1e-8:
                         if token_id not in position_skip_logged:
                             position_skip_logged.add(token_id)
@@ -698,11 +714,68 @@ def main() -> None:
                     _token_id(o) for o in eligible_orders if _token_id(o)
                 }
                 tokens_for_trades |= fill_tracker.prev_token_ids()
+
+                # --- Parallel fetch: trades, orderbooks, rewards_spread ---
+                # These three data sources are independent per-token/condition;
+                # fetching them concurrently cuts ~30 serial REST calls to ~1 RTT.
                 trades_by_token: dict[str, list] = {}
-                for _tid in tokens_for_trades:
-                    trades_by_token[_tid] = risk.fetch_trades_for_token(
-                        client, _tid
-                    )
+                _unique_tokens_for_book: set[str] = set()
+                _unique_conditions_for_reward: dict[str, str] = {}  # condition_id -> any token
+                for o in eligible_orders:
+                    tid = _token_id(o)
+                    cid = _market(o)
+                    if tid:
+                        _unique_tokens_for_book.add(tid)
+                    if cid:
+                        _unique_conditions_for_reward.setdefault(cid, tid)
+
+                with ThreadPoolExecutor(
+                    max_workers=min(16, max(4, len(tokens_for_trades) + len(_unique_tokens_for_book) + len(_unique_conditions_for_reward))),
+                    thread_name_prefix="data-fetch",
+                ) as pool:
+                    # Submit trades fetches
+                    _trades_futures = {
+                        pool.submit(risk.fetch_trades_for_token, client, tid): tid
+                        for tid in tokens_for_trades
+                    }
+                    # Submit orderbook fetches
+                    _book_futures = {
+                        pool.submit(book_fetcher.get_orderbook, tid): tid
+                        for tid in _unique_tokens_for_book
+                    }
+                    # Submit rewards_max_spread fetches (only for uncached conditions)
+                    _reward_futures = {
+                        pool.submit(
+                            reward_monitor.get_rewards_max_spread_for_market, cid
+                        ): cid
+                        for cid in _unique_conditions_for_reward
+                    }
+
+                    # Collect trades
+                    for fut in as_completed(_trades_futures):
+                        tid = _trades_futures[fut]
+                        try:
+                            trades_by_token[tid] = fut.result()
+                        except Exception as e:
+                            LOG.warning("parallel trades fetch failed token=%s: %s", tid[:24], e)
+                            trades_by_token[tid] = []
+
+                    # Collect orderbooks
+                    _book_rest_results: dict[str, Any] = {}
+                    for fut in as_completed(_book_futures):
+                        tid = _book_futures[fut]
+                        try:
+                            _book_rest_results[tid] = fut.result()
+                        except Exception as e:
+                            LOG.warning("parallel book fetch failed token=%s: %s", tid[:24], e)
+
+                    # Collect rewards (result cached inside RewardMonitor, just ensure done)
+                    for fut in as_completed(_reward_futures):
+                        cid = _reward_futures[fut]
+                        try:
+                            fut.result()
+                        except Exception as e:
+                            LOG.warning("parallel reward fetch failed cid=%s: %s", cid[:20], e)
 
                 def _send_fill_telegram(**kw: Any) -> None:
                     if not telegram.enabled:
@@ -766,7 +839,9 @@ def main() -> None:
                         continue
 
                     if token_id not in book_cache:
-                        book_rest = book_fetcher.get_orderbook(token_id)
+                        book_rest = _book_rest_results.get(token_id)
+                        if book_rest is None:
+                            book_rest = book_fetcher.get_orderbook(token_id)
                         book_i = book_rest
                         depth_src = "rest"
                         tick_src = "rest"
@@ -804,6 +879,21 @@ def main() -> None:
                     book = bentry["book"]
                     depth_src = str(bentry["depth_source"])
                     tick_src = str(bentry["tick_source"])
+                    # WS 可能把 tick_size 覆盖成 0.01，但未与盘口价位交叉校验；与 REST 路径一致再算一遍。
+                    eff_tick = resolve_effective_tick_size(
+                        book.tick_size, book.bids, book.asks
+                    )
+                    if eff_tick != float(book.tick_size or 0.01):
+                        book = OrderBookSnapshot(
+                            best_bid=book.best_bid,
+                            best_ask=book.best_ask,
+                            tick_size=float(eff_tick),
+                            neg_risk=book.neg_risk,
+                            bids=book.bids,
+                            asks=book.asks,
+                            raw=book.raw,
+                        )
+                        book_cache[token_id]["book"] = book
                     mid = book.mid
                     if mid is None:
                         mid = book_fetcher.mid_price(token_id)
@@ -811,7 +901,25 @@ def main() -> None:
                         LOG.warning("No mid for token %s; skip order %s", token_id[:24], oid[:16])
                         continue
 
+                    inventory = inv_by_token[token_id]
+                    side = _side(o)
+                    price = _price(o)
+                    sz = _remaining_size(o)
+
                     tick = float(book.tick_size or 0.01)
+                    # Cross-check: if the order price itself has sub-cent
+                    # precision (e.g. 0.038), the tick MUST be 0.001 regardless
+                    # of what the API / WS reported.
+                    if tick > 0.005:
+                        cents = price * 100.0
+                        if abs(cents - round(cents)) > 1e-7:
+                            LOG.warning(
+                                "tick_size override (order price): tick was %.6f but "
+                                "order price %.4f has sub-cent precision → using 0.001",
+                                tick,
+                                price,
+                            )
+                            tick = 0.001
                     rewards_spread = reward_monitor.get_rewards_max_spread_for_market(condition_id)
                     reward_range = reward_monitor.get_reward_range(mid, rewards_spread)
                     delta = max(reward_range.delta, 1e-9)
@@ -819,10 +927,6 @@ def main() -> None:
                     scoring = bool(scoring_map.get(oid, False))
                     # 与 eligible_orders 一致：每 token 每轮只信一次仓位快照，避免两次 positions
                     # 请求结果不一致时出现「过滤时无仓、Telegram 却显示有仓仍改价」。
-                    inventory = inv_by_token[token_id]
-                    side = _side(o)
-                    price = _price(o)
-                    sz = _remaining_size(o)
 
                     cycle_rows.append(
                         {
@@ -864,6 +968,7 @@ def main() -> None:
                     ),
                 )
 
+                _inv_recheck_cache: dict[str, float] = {}
                 fill_monitor_keys_done: set[str] = set()
                 for row in cycle_rows:
                     o = row["o"]
@@ -1041,11 +1146,18 @@ def main() -> None:
                     env_custom = order_uses_custom_pricing(
                         o, config.custom_pricing_order_ids
                     )
-                    use_custom = stored_rule is not None or env_custom
+                    use_env_default_custom = bool(
+                        config.default_custom_pricing_from_env
+                    )
+                    use_custom = (
+                        stored_rule is not None
+                        or env_custom
+                        or use_env_default_custom
+                    )
                     if stored_rule is not None:
                         settings_for_order = stored_rule.to_settings()
                         regime_override = stored_rule.tick_regime
-                    elif env_custom:
+                    elif env_custom or use_env_default_custom:
                         settings_for_order = custom_pricing_settings
                         regime_override = None
                     else:
@@ -1103,8 +1215,13 @@ def main() -> None:
                             event_key=f"warn:replace_post:{oid}:{attempt}",
                         )
 
-                    # 提交前再查一次：若 Data API 在轮内从「无仓」变为「有仓」，避免误改价。
-                    inv_before_apply = risk.get_inventory(condition_id, token_id)
+                    # 提交前复查持仓：按 token 去重（同一 token 同一轮只查一次），
+                    # 避免 20 单 × 逐单查询的 O(N) REST 开销。
+                    if token_id not in _inv_recheck_cache:
+                        _inv_recheck_cache[token_id] = risk.get_inventory(
+                            condition_id, token_id
+                        )
+                    inv_before_apply = _inv_recheck_cache[token_id]
                     if abs(inv_before_apply) > 1e-8:
                         LOG.info(
                             "SKIP_POSITION_RECHECK token_id=%s condition_id=%s inventory=%.6f — "

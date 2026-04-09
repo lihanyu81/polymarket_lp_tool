@@ -19,6 +19,7 @@ from typing import Any, Optional
 from passive_liquidity.custom_pricing_rules_store import CustomPricingRulesStore
 from passive_liquidity.order_manager import OrderManager
 from passive_liquidity.orderbook_fetcher import OrderBookFetcher
+from passive_liquidity.reward_monitor import RewardMonitor
 from passive_liquidity.simple_price_policy import CustomPricingSettings
 from passive_liquidity.telegram_live_queries import (
     get_live_account_status,
@@ -71,6 +72,7 @@ def _poll_loop(
     poll_timeout_sec: int,
     rules_store: CustomPricingRulesStore,
     book_fetcher: OrderBookFetcher,
+    reward_monitor: RewardMonitor,
     default_custom_settings: CustomPricingSettings,
     market_display: Optional[MarketDisplayResolver],
 ) -> None:
@@ -193,7 +195,43 @@ def _poll_loop(
                             client=client,
                             order_manager=order_manager,
                             market_display=market_display,
+                            book_fetcher=book_fetcher,
+                            reward_monitor=reward_monitor,
                         )
+                    elif cmd == "/cancel":
+                        arg = arg_rest.strip()
+                        if not arg:
+                            ok, body = False, "用法: /cancel <order_id|all>"
+                        elif arg.lower() == "all":
+                            try:
+                                orders = order_manager.fetch_all_open_orders(client)
+                            except Exception as e:
+                                ok, body = False, f"拉取未成交单失败: {e}"
+                            else:
+                                total = 0
+                                failed = 0
+                                for o in orders:
+                                    oid = str(o.get("id") or o.get("orderID") or "").strip()
+                                    if not oid:
+                                        continue
+                                    total += 1
+                                    try:
+                                        client.cancel(oid)
+                                    except Exception:
+                                        failed += 1
+                                if total == 0:
+                                    ok, body = True, "当前无挂单，无需取消。"
+                                elif failed == 0:
+                                    ok, body = True, f"已提交取消全部挂单，共 {total} 笔。"
+                                else:
+                                    ok, body = False, f"取消完成：成功 {total - failed}/{total}，失败 {failed}。"
+                        else:
+                            oid = arg
+                            try:
+                                client.cancel(oid)
+                                ok, body = True, f"已提交取消订单: {oid[:48]}…"
+                            except Exception as e:
+                                ok, body = False, f"取消失败: {e}"
                     elif cmd == "/pnl":
                         ok, body = get_live_pnl(
                             client=client,
@@ -206,6 +244,7 @@ def _poll_loop(
                             "可用命令（实时查询，非半点摘要）：\n"
                             "/status — 账户与挂单概览\n"
                             "/orders — 未成交单（盘口名、order_id、side、price、size）\n"
+                            "/cancel <order_id|all> — 取消指定订单或全部挂单\n"
                             "/pnl — 盈亏\n"
                             "\n自定义调价（规则按 token_id + 买卖方向 保存）：\n"
                             "/set_rule <order_id> — 交互式配置\n"
@@ -250,6 +289,7 @@ def start_telegram_command_poller(
     stop: threading.Event,
     rules_store: CustomPricingRulesStore,
     book_fetcher: OrderBookFetcher,
+    reward_monitor: RewardMonitor,
     default_custom_settings: CustomPricingSettings,
     market_display: Optional[MarketDisplayResolver] = None,
 ) -> Optional[threading.Thread]:
@@ -284,6 +324,7 @@ def start_telegram_command_poller(
             poll_timeout_sec=poll_timeout,
             rules_store=rules_store,
             book_fetcher=book_fetcher,
+            reward_monitor=reward_monitor,
             default_custom_settings=default_custom_settings,
             market_display=market_display,
         )

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 — Polymarket Web</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="wrap">
+    <div class="login-box card">
+      <h1>登录</h1>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      <form method="post" action="{{ url_for('login') }}">
+        {% set nxt = request.args.get('next') %}
+        {% if nxt %}
+        <input type="hidden" name="next" value="{{ nxt }}">
+        {% endif %}
+        <label for="password">访问密码（与 .env 中 WEB_PANEL_TOKEN 相同）</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password" autofocus>
+        <p style="margin-top:1rem">
+          <button type="submit">进入</button>
+        </p>
+      </form>
+      <p class="hint">默认仅监听本机；请勿把该页面暴露到公网。与交易机器人共用同一套 .env（含私钥），务必妥善保管 TOKEN。</p>
+    </div>
+  </div>
+</body>
+</html>

@@ -11,7 +11,7 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 1. **白名单**：若设置 `PASSIVE_TOKEN_WHITELIST`，则仅以环境变量为准（运行中不随挂单变化）。若未设置，则从当前未成交单提取 `token_id`，并默认每 **120 秒**（`PASSIVE_WHITELIST_REFRESH_SEC`）用未成交单刷新，以便启动后新挂的单可被纳入；设为 `0` 则仅在启动时种子一次。
 2. **过滤**：仅管理白名单内订单；若该 `token_id` **已有持仓**（`abs(inventory) > 1e-8`），则**整 token 不处理**（不撤、不改、不进 fill 推断与周期摘要明细）。
-3. **调价**：仅 `passive_liquidity/simple_price_policy.py` 中的 **`decide_simple_price`**（粗 tick / 细 tick；见下文）。若该 `token_id`+方向在 **Telegram 保存了自定义规则**，或订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`**，则进入 **custom** 分支（规则优先于纯环境自定义）。**不再**使用 `AdjustmentEngine`、结构性风控、fill risk、按积分微调、按库存调价等旧逻辑（相关文件仍留在仓库，主循环不调用）。
+3. **调价**：仅 `passive_liquidity/simple_price_policy.py` 中的 **`decide_simple_price`**（粗 tick / 细 tick；见下文）。若该 `token_id`+方向在 **Telegram 保存了自定义规则**，或订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`**，或开启 **`PASSIVE_DEFAULT_CUSTOM_PRICING`**，则进入 **custom** 分支（用 `.env` 的 **`PASSIVE_CUSTOM_*`**；持久化规则优先）。**不再**使用 `AdjustmentEngine`、结构性风控、fill risk、按积分微调、按库存调价等旧逻辑（相关文件仍留在仓库，主循环不调用）。
 4. **执行**：`OrderManager.apply_decision`（撤单、撤单后延迟、挂单失败可无限重试或限次，由配置决定）。
 5. **可选**：成交推断 Telegram、半点资金摘要、周期性 **band + 盘口深度** 摘要。
 
@@ -50,8 +50,9 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 **生效优先级（同一订单）**
 
 1. 已为该 **`token_id` + `BUY`/`SELL`** 在 Telegram **保存规则** → 使用持久化规则（`custom_pricing_rules.json`，路径可由 **`PASSIVE_CUSTOM_RULES_PATH`** 覆盖；文件已在 `.gitignore` 中忽略）。
-2. 否则，若订单 id 在 **`PASSIVE_CUSTOM_ORDER_IDS`**（逗号分隔，与 CLOB 返回 id 完全一致）→ 使用 **`.env` 里 `PASSIVE_CUSTOM_*`** 默认自定义参数。
-3. 否则 → 上节**默认**粗/细 tick 策略。
+2. 否则，若 **`PASSIVE_DEFAULT_CUSTOM_PRICING=true`** → 使用 **`.env` 里 `PASSIVE_CUSTOM_*`** 作为**全局默认**自定义参数（不必再列 `PASSIVE_CUSTOM_ORDER_IDS`）。
+3. 否则，若订单 id 在 **`PASSIVE_CUSTOM_ORDER_IDS`**（逗号分隔，与 CLOB 返回 id 完全一致）→ 使用同一套 **`PASSIVE_CUSTOM_*`**。
+4. 否则 → 上节**内置**粗/细 tick 策略（非 custom）。
 
 **Telegram 交互**（需 **`TELEGRAM_ENABLED=true`** 且 **`TELEGRAM_COMMANDS_ENABLED`** 未设为关闭；命令由 `telegram_command_poller` 轮询处理）
 
@@ -65,24 +66,25 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 **粗 tick 自定义（`pricing_mode=custom` 且 tick 归为粗）**
 
-- 配置正整数 **N**：**N=1** 目标为**对齐后的 mid**；**N=k** 为距 mid **(k−1) 个 tick**、向激励带方向移动（**BUY** 向低价，**SELL** 对称向高价）。例 `tick=0.01`、mid 对齐到 `0.16`：N=1→0.16，N=2→0.15，N=3→0.14。
-- 可选 **不允许挂在最优买/卖价**（与 **`PASSIVE_CUSTOM_COARSE_ALLOW_TOP_OF_BOOK`** 同理）；**`min_candidate_levels`**：激励带与 (0,1) 交集内至少要有足够 tick 档才允许按 N 调价，否则本轮回合保持。
+- 配置正整数 **N**：只在**当前订单簿同侧、激励带扫描范围内有正深度的价位**中排序（离 mid 最近为第 1 档）；**没有挂单的 tick 价位不计入**。BUY 示例：扫描带可能覆盖到 0.28，但簿上只有 `[0.26,0.27]` 时只在这两档上数 N（SELL 对称）。
+- 可选 **不允许挂在最优买/卖价**（与 **`PASSIVE_CUSTOM_COARSE_ALLOW_TOP_OF_BOOK`** 同理）；**`min_candidate_levels`**：上述「簿上价位」个数至少达到该值才允许按 N 调价，否则本轮回合保持。
 
 **细 tick 自定义**
 
 - 在 **`PASSIVE_CUSTOM_FINE_SAFE_MIN`～`PASSIVE_CUSTOM_FINE_SAFE_MAX`** 比例带内保持；否则按 **`PASSIVE_CUSTOM_FINE_TARGET_RATIO`** 在带内收放（与 `simple_price_policy._decide_custom_fine` 一致）。
 
-**环境变量一览（`PASSIVE_CUSTOM_*`）**
+**环境变量一览（`PASSIVE_CUSTOM_*` 与默认开关）**
 
-仅当订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`** 且**该 token+方向没有** Telegram 持久化规则时，下列粗/细参数才作为该单的自定义默认值；Telegram **`/set_rule`** 保存的规则会覆盖同键下的行为，且**不再**读取这些 env 粗/细项（规则里自带一份快照）。
+当 **`PASSIVE_DEFAULT_CUSTOM_PRICING=true`**，或订单在 **`PASSIVE_CUSTOM_ORDER_IDS`** 中，且**没有** Telegram 持久化规则时，下列参数作为自定义调价；**`/set_rule`** 保存的规则仍优先，且规则内自带一份快照（不再读 env 粗/细项）。
 
 | 变量 | 含义 | 默认（未设置 env 时） |
 | --- | --- | --- |
-| **`PASSIVE_CUSTOM_ORDER_IDS`** | 逗号分隔的 **order id**（与 CLOB 一致）；列在此的订单使用自定义调价（若无持久化规则则用本表以下 env）。 | （空，不启用） |
+| **`PASSIVE_DEFAULT_CUSTOM_PRICING`** | `true`/`yes`/`1`/`on`：凡无 Telegram 规则的挂单均走 **`PASSIVE_CUSTOM_*`**（内置默认策略关闭）。 | `false` |
+| **`PASSIVE_CUSTOM_ORDER_IDS`** | 逗号分隔的 **order id**（与 CLOB 一致）；仅当上一项为 `false` 时，列在此的订单才用自定义调价（无持久化规则时）。 | （空，不启用） |
 | **`PASSIVE_CUSTOM_RULES_PATH`** | 规则 JSON 文件路径；空则使用项目目录下 **`custom_pricing_rules.json`**。 | `custom_pricing_rules.json` |
-| **`PASSIVE_CUSTOM_COARSE_TICK_OFFSET`** | 粗 tick 档位 **N**（正整数）：N=1 对齐 mid，N=k 距 mid 为 (k−1) 个 tick。 | `1` |
+| **`PASSIVE_CUSTOM_COARSE_TICK_OFFSET`** | 粗 tick 档位 **N**（正整数）：在激励带内**订单簿有深度的价位**中从离 mid 最近往外数第 N 个。 | `1` |
 | **`PASSIVE_CUSTOM_COARSE_ALLOW_TOP_OF_BOOK`** | 粗 tick 是否允许目标价落在**最优买/卖档**（`true`/`yes`/`1`/`on` 为允许）。 | `true` |
-| **`PASSIVE_CUSTOM_COARSE_MIN_CANDIDATES`** | 激励带与 (0,1) 交集内至少需要的 **tick 档位数**；不足则本轮回合保持。 | `1` |
+| **`PASSIVE_CUSTOM_COARSE_MIN_CANDIDATES`** | 激励带内**簿上价位**个数下限；不足则本轮回合保持。 | `1` |
 | **`PASSIVE_CUSTOM_FINE_SAFE_MIN`** | 细 tick：`distance_ratio` 安全带下界（与 mid、δ 比例相关）。 | `0.4` |
 | **`PASSIVE_CUSTOM_FINE_SAFE_MAX`** | 细 tick：安全带上界。 | `0.6` |
 | **`PASSIVE_CUSTOM_FINE_TARGET_RATIO`** | 细 tick：带外时趋向的 **目标比例**（0～1）。 | `0.5` |

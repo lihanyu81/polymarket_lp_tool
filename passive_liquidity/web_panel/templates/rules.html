@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}自定义规则{% endblock %}
+{% block body %}
+<p class="muted">持久化文件（与机器人、Telegram 共用）: <code>{{ rules_path }}</code></p>
+<p class="muted">主程序仍优先使用此处保存的规则；与 Telegram <code>/set_rule</code> 写入同一 JSON。若机器人与网页同时改文件，存在竞态，建议单点编辑。</p>
+
+<div class="card">
+  <h2>已有规则</h2>
+  {% if items|length == 0 %}
+  <p class="muted">暂无保存规则。</p>
+  {% else %}
+  <table class="orders">
+    <thead>
+      <tr>
+        <th>键</th>
+        <th>regime</th>
+        <th>粗 tick N</th>
+        <th>粗 顶档</th>
+        <th>粗 最少档</th>
+        <th>细 safe</th>
+        <th>细 target</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr>
+        <td><code>{{ it.key }}</code></td>
+        <td>{{ it.tick_regime }}</td>
+        <td>{{ it.coarse_tick_offset_from_mid }}</td>
+        <td>{{ '是' if it.coarse_allow_top_of_book else '否' }}</td>
+        <td>{{ it.coarse_min_candidate_levels }}</td>
+        <td>{{ "%.2f ~ %.2f" % (it.fine_safe_band_min, it.fine_safe_band_max) }}</td>
+        <td>{{ "%.2f" % it.fine_target_band_ratio }}</td>
+        <td>
+          <form method="post" action="{{ url_for('rules_delete') }}">
+            <input type="hidden" name="token_id" value="{{ it.token_id }}">
+            <input type="hidden" name="side" value="{{ it.side }}">
+            <button type="submit" class="danger">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>新增 / 覆盖规则</h2>
+  <form method="post" action="{{ url_for('rules_add') }}">
+    <label for="token_id">token_id（outcome 资产 id）</label>
+    <input type="text" id="token_id" name="token_id" required placeholder="从挂单或 Gamma 复制">
+    <label for="side">方向</label>
+    <select id="side" name="side">
+      <option value="BUY">BUY</option>
+      <option value="SELL">SELL</option>
+    </select>
+    <label for="tick_regime">tick 模式</label>
+    <select id="tick_regime" name="tick_regime">
+      <option value="coarse">coarse（粗 tick）</option>
+      <option value="fine">fine（细 tick）</option>
+    </select>
+    <div class="rule-grid" style="margin-top:0.75rem">
+      <div>
+        <label>粗：激励带内订单簿价位，离 mid 第 N 档（无深度价位不计）</label>
+        <input type="number" name="coarse_tick_offset_from_mid" value="1" min="1">
+      </div>
+      <div>
+        <label>粗：允许顶档</label>
+        <label style="display:flex;align-items:center;gap:0.4rem;margin-top:0.25rem">
+          <input type="checkbox" name="coarse_allow_top_of_book" checked> coarse_allow_top_of_book
+        </label>
+      </div>
+      <div>
+        <label>粗：最少簿上候选档位数（coarse_min_candidate_levels）</label>
+        <input type="number" name="coarse_min_candidate_levels" value="1" min="1">
+      </div>
+      <div>
+        <label>细：safe 带 min</label>
+        <input type="number" step="0.01" name="fine_safe_band_min" value="0.4">
+      </div>
+      <div>
+        <label>细：safe 带 max</label>
+        <input type="number" step="0.01" name="fine_safe_band_max" value="0.6">
+      </div>
+      <div>
+        <label>细：目标 band 比例</label>
+        <input type="number" step="0.01" name="fine_target_band_ratio" value="0.5">
+      </div>
+    </div>
+    <p style="margin-top:1rem"><button type="submit">保存规则</button></p>
+  </form>
+</div>
+{% endblock %}

@@ -26,8 +26,9 @@ PricingMode = Literal["default", "custom"]
 class CustomPricingSettings:
     """Env-driven knobs for pricing_mode=custom (see PASSIVE_CUSTOM_*).
 
-    ``coarse_tick_offset_from_mid`` (N): coarse targets aligned mid when N=1,
-    else (N-1) ticks from aligned mid toward the reward band (BUY lower, SELL higher).
+    ``coarse_tick_offset_from_mid`` (N): rank within **order-book prices** that fall
+    in the coarse reward half-band (1 = nearest to mid among those levels only;
+    empty tick rungs with no resting size do not count); see ``_decide_custom_coarse``.
     """
 
     coarse_tick_offset_from_mid: int
@@ -47,7 +48,11 @@ def order_uses_custom_pricing(order: dict, custom_order_ids: frozenset[str]) -> 
 
 
 def classify_tick_regime(tick: float) -> TickRegime:
-    """API may return 0.01 / 0.001 or 1 / 0.1 depending on scaling."""
+    """Classify regime from effective tick size (may be reconciled from the L2 book).
+
+    Call sites should pass ``tick_size`` after ``resolve_effective_tick_size`` so
+    WS/API mismatches (e.g. reported 0.01 but book is 0.001) map to ``fine``.
+    """
     t = float(tick)
     if math.isclose(t, 1.0, rel_tol=0.0, abs_tol=1e-6) or math.isclose(
         t, 0.01, rel_tol=0.0, abs_tol=1e-9
@@ -151,6 +156,100 @@ def _book_prices_in_range(
             continue
         out.add(p)
     return sorted(out)
+
+
+def _order_coarse_candidates_near_to_far(
+    side_u: str, mid: float, prices: list[float]
+) -> list[float]:
+    """
+    Custom coarse N: order distinct band prices from nearest mid to farthest.
+
+    Tie-break (same |p-mid|): BUY prefers higher p, SELL prefers lower p.
+    """
+    mid_f = float(mid)
+
+    def _key(p: float) -> tuple[float, float]:
+        p = float(p)
+        d = abs(mid_f - p)
+        if side_u == "BUY":
+            return (d, -p)
+        return (d, p)
+
+    return sorted(prices, key=_key)
+
+
+def list_coarse_reward_book_candidates(
+    side: str,
+    mid: float,
+    delta: float,
+    tick: float,
+    bids: list[Any],
+    asks: list[Any],
+) -> tuple[float, float, list[float]]:
+    """
+    Coarse regime: (scan_lo, scan_hi_clipped, book prices in band, near-mid→far).
+
+    Used by Telegram/Web reward lines and matches custom coarse N semantics.
+    """
+    side_u = str(side).strip().upper()
+    lo, hi, _, _ = _coarse_reward_scan_range(side_u, float(mid), float(delta), tick)
+    lo_c = max(float(lo), 1e-12)
+    hi_c = min(float(hi), 1.0 - 1e-12)
+    if lo_c > hi_c + 1e-15:
+        return lo_c, hi_c, []
+    levels = bids if side_u == "BUY" else asks
+    cand = _book_prices_in_range(side_u, levels, lo_c, hi_c, tick)
+    ordered = _order_coarse_candidates_near_to_far(side_u, mid, cand)
+    return lo_c, hi_c, ordered
+
+
+def fine_tick_display_decimals(tick: float) -> int:
+    """Print width for outcome prices: 0.01 grid -> 2 decimals, 0.001 -> 3."""
+    return 2 if float(tick) >= 0.009 else 3
+
+
+def fine_reward_display_lo_hi(
+    mid: float,
+    delta: float,
+    tick: float,
+    bids: list[Any],
+    asks: list[Any],
+) -> tuple[float, float, bool]:
+    """
+    Fine-tick reward *display* interval.
+
+    Symmetric band [mid−δ, mid+δ] (clipped to valid outcome range).
+
+    - If any bid or ask with positive size lies in that band: return
+      (min price, max price) among those resting levels (tick-rounded), and True.
+    - Else: return the band edges snapped **inward** to the tick grid
+      (ceil lower bound, floor upper bound) so e.g. 0.9215→0.922, 0.9915→0.991
+      at tick=0.001; and False.
+    """
+    m = float(mid)
+    d = max(0.0, float(delta))
+    t = max(float(tick), 1e-12)
+    raw_lo = m - d
+    raw_hi = m + d
+    clip_lo = max(t, min(1.0 - t, raw_lo))
+    clip_hi = max(t, min(1.0 - t, raw_hi))
+    if clip_lo > clip_hi + 1e-15:
+        return clip_lo, clip_hi, False
+
+    bp = _book_prices_in_range("BUY", bids, clip_lo, clip_hi, t)
+    ap = _book_prices_in_range("SELL", asks, clip_lo, clip_hi, t)
+    merged = sorted(set(bp + ap))
+    if merged:
+        return float(merged[0]), float(merged[-1]), True
+
+    k_lo = int(math.ceil(clip_lo / t - 1e-9))
+    k_hi = int(math.floor(clip_hi / t + 1e-9))
+    lo_d = max(t, min(1.0 - t, k_lo * t))
+    hi_d = max(t, min(1.0 - t, k_hi * t))
+    if lo_d > hi_d + 1e-12:
+        lo_d = _round_tick(clip_lo, t)
+        hi_d = _round_tick(clip_hi, t)
+    return lo_d, hi_d, False
 
 
 @dataclass(frozen=True)
@@ -317,29 +416,6 @@ def _min_replace_delta(tick: float, min_replace_ticks: int) -> float:
     return max(1, int(min_replace_ticks)) * float(tick)
 
 
-def _tick_prices_in_closed_interval(lo: float, hi: float, tick: float) -> list[float]:
-    """All tick-aligned prices in [lo, hi] (inclusive), ascending.
-
-    Uses raw multiples of ``tick`` (not ``_round_tick``), because ``_round_tick`` clamps
-    to ``[tick, 1 - tick]`` for CLOB probability prices and would break grids when
-    ``tick >= 1`` or when scanning wide numeric ranges.
-    """
-    t = max(float(tick), 1e-12)
-    lo_f, hi_f = float(lo), float(hi)
-    if hi_f < lo_f - 1e-15:
-        return []
-    k0 = int(math.ceil(lo_f / t - 1e-9))
-    k1 = int(math.floor(hi_f / t + 1e-9))
-    out: list[float] = []
-    for k in range(k0, k1 + 1):
-        p = float(k) * t
-        if p < lo_f - 1e-12 or p > hi_f + 1e-12:
-            continue
-        if not out or abs(p - out[-1]) > 1e-12:
-            out.append(p)
-    return out
-
-
 def _valid_clob_probability_price(p: float) -> bool:
     """Polymarket outcome prices must lie strictly inside (0, 1)."""
     x = float(p)
@@ -408,70 +484,53 @@ def _decide_custom_coarse(
             meta,
         )
 
-    grid = _tick_prices_in_closed_interval(lo_c, hi_c, tick)
+    levels = bids if side_u == "BUY" else asks
+    cand = _book_prices_in_range(side_u, levels, lo_c, hi_c, tick)
+    ordered = _order_coarse_candidates_near_to_far(side_u, mid, cand)
     min_need = int(settings.coarse_min_candidate_levels)
     if min_need < 1:
         min_need = 1
-    if len(grid) < min_need:
-        meta["candidate_prices"] = list(grid)
-        meta["candidate_count"] = len(grid)
+    if len(ordered) < min_need:
+        meta["candidate_prices"] = list(ordered)
+        meta["candidate_count"] = len(ordered)
         meta["custom_coarse_tick_offset"] = int(settings.coarse_tick_offset_from_mid)
         rcode = "custom_coarse_keep_insufficient_candidates"
         meta["reason_code"] = rcode
         meta["chosen_target_price"] = None
         LOG.info(
-            "custom_price coarse tick=%s grid_levels=%d need>=%d -> keep",
+            "custom_price coarse tick=%s book_levels_in_band=%d need>=%d -> keep",
             tick,
-            len(grid),
+            len(ordered),
             min_need,
         )
         return AdjustmentDecision("keep", reason=rcode), meta
 
     user_n = max(1, int(settings.coarse_tick_offset_from_mid))
-    # N=1 → 对齐 mid；N=k → 距对齐 mid 为 (k−1) 个 tick（BUY 向低价，SELL 对称向高价）。
-    # 例 mid_s=0.16、tick=0.01：N=1→0.16，N=2→0.15，N=3→0.14，N=4→0.13。
-    offset = max(0, user_n - 1)
-    t = max(float(tick), 1e-12)
-    mid_s = _round_tick(float(mid), t)
-    if side_u == "BUY":
-        raw_target = mid_s - offset * t
-    else:
-        raw_target = mid_s + offset * t
-
-    chosen = _round_tick(raw_target, t)
-    chosen = max(lo_c, min(hi_c, chosen))
-    chosen = _round_tick(chosen, t)
-    chosen = max(lo_c, min(hi_c, chosen))
+    # N is rank among **resting** prices in the band (near-mid → far), not empty ticks.
+    rank_idx = user_n - 1
+    if rank_idx >= len(ordered):
+        meta["candidate_prices"] = list(ordered)
+        meta["candidate_count"] = len(ordered)
+        meta["custom_coarse_tick_offset"] = user_n
+        meta["custom_coarse_tick_offset_effective"] = None
+        meta["chosen_target_price"] = None
+        meta["reason_code"] = "custom_coarse_keep_rank_outside_band_levels"
+        return (
+            AdjustmentDecision("keep", reason="custom_coarse_keep_rank_outside_band_levels"),
+            meta,
+        )
+    chosen = float(ordered[rank_idx])
+    effective_rank = rank_idx + 1
 
     if not _valid_clob_probability_price(chosen):
         meta["candidate_prices"] = []
         meta["candidate_count"] = 0
         meta["custom_coarse_tick_offset"] = user_n
-        meta["custom_coarse_tick_offset_effective"] = offset
+        meta["custom_coarse_tick_offset_effective"] = effective_rank
         meta["chosen_target_price"] = None
         meta["reason_code"] = "custom_coarse_keep_offset_invalid_price"
         return (
             AdjustmentDecision("keep", reason="custom_coarse_keep_offset_invalid_price"),
-            meta,
-        )
-
-    ticks_at_target = _ticks_from_mid_into_band(side_u, mid_s, chosen, tick)
-    if ticks_at_target != offset:
-        meta["candidate_prices"] = [chosen]
-        meta["candidate_count"] = 1
-        meta["custom_coarse_tick_offset"] = user_n
-        meta["custom_coarse_tick_offset_effective"] = offset
-        meta["chosen_target_price"] = chosen
-        meta["reason_code"] = "custom_coarse_keep_offset_outside_band"
-        LOG.info(
-            "custom_price coarse user_n=%d eff=%d ticks_at_target=%d chosen=%.6f -> keep (clamped)",
-            user_n,
-            offset,
-            ticks_at_target,
-            chosen,
-        )
-        return (
-            AdjustmentDecision("keep", reason="custom_coarse_keep_offset_outside_band"),
             meta,
         )
 
@@ -481,7 +540,7 @@ def _decide_custom_coarse(
                 meta["candidate_prices"] = [chosen]
                 meta["candidate_count"] = 1
                 meta["custom_coarse_tick_offset"] = user_n
-                meta["custom_coarse_tick_offset_effective"] = offset
+                meta["custom_coarse_tick_offset_effective"] = effective_rank
                 meta["chosen_target_price"] = chosen
                 meta["reason_code"] = "custom_coarse_keep_target_is_top_of_book"
                 return (
@@ -495,7 +554,7 @@ def _decide_custom_coarse(
                 meta["candidate_prices"] = [chosen]
                 meta["candidate_count"] = 1
                 meta["custom_coarse_tick_offset"] = user_n
-                meta["custom_coarse_tick_offset_effective"] = offset
+                meta["custom_coarse_tick_offset_effective"] = effective_rank
                 meta["chosen_target_price"] = chosen
                 meta["reason_code"] = "custom_coarse_keep_target_is_top_of_book"
                 return (
@@ -505,10 +564,10 @@ def _decide_custom_coarse(
                     meta,
                 )
 
-    meta["candidate_prices"] = [chosen]
-    meta["candidate_count"] = 1
+    meta["candidate_prices"] = list(ordered)
+    meta["candidate_count"] = len(ordered)
     meta["custom_coarse_tick_offset"] = user_n
-    meta["custom_coarse_tick_offset_effective"] = offset
+    meta["custom_coarse_tick_offset_effective"] = effective_rank
     meta["chosen_target_price"] = chosen
     meta["reason_code"] = "custom_coarse_replace_exact_offset_from_mid"
 

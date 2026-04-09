@@ -175,7 +175,7 @@ def _summary_coarse(sess: RuleSetupSession) -> str:
     return (
         f"{_fmt_snap(sess.snap)}\n"
         f"规则类型: 粗 tick（与主程序一致：tick≈0.01 或 ≈1.0）\n"
-        f"tick_offset_from_mid（配置值 N；距对齐 mid 的 tick 步数=max(0,N−1)，N=1 即对齐 mid）: N={sess.draft_offset}\n"
+        f"粗 tick 档位 N（按奖励区间离散档位，从离 mid 最近开始计数）: N={sess.draft_offset}\n"
         f"允许最优档: {top}\n"
         f"min_candidate_levels: {sess.draft_min_cand}\n"
         f"\n回复 confirm 保存，或 cancel 放弃。"
@@ -261,8 +261,8 @@ def cmd_set_rule(
         return (
             f"开始配置自定义调价（粗 tick）。\n{_fmt_snap(sess.snap)}\n\n"
             "第 1/4 步：请输入正整数 N（≥1）。"
-            "N=1 落在对齐后的 mid；N=k 距 mid 为 (k−1) 个 tick。"
-            "例 tick=0.01、mid 对齐到 0.16：N=1→0.16，N=2→0.15，N=3→0.14，N=4→0.13（BUY 向低价；SELL 对称向高价）。"
+            "N 表示奖励区间离散档位序号（从离 mid 最近开始）。"
+            "例 BUY 且可得档位为 [0.28,0.27,0.26]：N=1→0.28，N=2→0.27，N=3→0.26。"
             f"{_GROUP_INPUT_HINT}"
         )
 
@@ -302,12 +302,11 @@ def cmd_get_rule(
     if rule is None:
         return f"键 {key} 暂无保存的自定义规则（使用默认调价）。"
     top = "是" if rule.coarse_allow_top_of_book else "否"
-    eff = max(0, int(rule.coarse_tick_offset_from_mid) - 1)
     return (
         f"键: {key}\n"
         f"保存的 tick 分支: {rule.tick_regime}\n"
         f"粗: N(配置)={rule.coarse_tick_offset_from_mid} "
-        f"距对齐mid步数={eff} allow_top={top} min_band_ticks={rule.coarse_min_candidate_levels}\n"
+        f"（奖励区间第N档） allow_top={top} min_band_ticks={rule.coarse_min_candidate_levels}\n"
         f"细: safe=[{rule.fine_safe_band_min}, {rule.fine_safe_band_max}] "
         f"target_ratio={rule.fine_target_band_ratio}"
     )
@@ -409,7 +408,7 @@ def handle_fsm_text(
 
     if sess.state == _State.COARSE_OFFSET:
         if not re.fullmatch(r"[0-9]+", raw):
-            return "请输入正整数 N（≥1）。例：mid≈0.16、要 0.15 填 2；要贴在 mid 填 1。"
+            return "请输入正整数 N（≥1）。例：若 BUY 可得档位是[0.28,0.27,0.26]，要 0.27 就填 2。"
         v = int(raw)
         if v < 1:
             return "N 须 >= 1。"

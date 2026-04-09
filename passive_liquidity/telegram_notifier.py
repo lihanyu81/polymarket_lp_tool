@@ -20,6 +20,11 @@ LOG = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def _fmt_amt(x: float) -> str:
+    """Telegram amount display (money/price) keeps 2 decimals."""
+    return f"{float(x):.2f}"
+
+
 def _maybe_log_supergroup_migration(error_body: str) -> None:
     """
     Telegram returns 400 with migrate_to_chat_id when a group was upgraded to supergroup.
@@ -87,10 +92,13 @@ _PRICING_REASON_ZH: dict[str, str] = {
         "自定义粗tick：激励带与有效价格区间无交集，保持"
     ),
     "custom_coarse_keep_insufficient_candidates": (
-        "自定义粗tick：激励带内 tick 档位数少于 min_candidate_levels，保持"
+        "自定义粗tick：激励带内订单簿有深度的价位数少于 min_candidate_levels，保持"
     ),
     "custom_coarse_replace_exact_offset_from_mid": (
-        "自定义粗tick：改价至配置 N 对应档（距对齐 mid 为 N−1 个 tick，N=1 即 mid）"
+        "自定义粗tick：按激励带内订单簿价位改价至第 N 档（离 mid 最近为第 1 档）"
+    ),
+    "custom_coarse_keep_rank_outside_band_levels": (
+        "自定义粗tick：配置 N 超出激励带内订单簿可选档位数，保持"
     ),
     "custom_coarse_keep_offset_outside_band": (
         "自定义粗tick：目标档被夹到带外或与配置步数不一致，保持"
@@ -351,16 +359,16 @@ class TelegramNotifier:
             f'盘口: "{market_title}"',
             f"方向: {outcome or '—'}",
             f"订单方向: {str(side).upper()}",
-            f"挂单价格: {order_price:.4f}",
+            f"挂单价格: {_fmt_amt(order_price)}",
             f"成交数量: {filled_size:g}",
             f"剩余数量: {remaining_size:g}",
             f"成交类型: {fill_type_zh}",
         ]
         if fill_price is not None:
-            lines.append(f"成交价格（约）: {fill_price:.4f}")
+            lines.append(f"成交价格（约）: {_fmt_amt(fill_price)}")
         lines.append(f"计分状态: {scoring_status_text_s}")
         if inventory is not None:
-            lines.append(f"当前持仓: {inventory:.4f}")
+            lines.append(f"当前持仓: {_fmt_amt(inventory)}")
         if fill_detection_source:
             lines.append(f"成交检测来源: {fill_detection_source}")
         return "\n".join(lines)
@@ -378,15 +386,15 @@ class TelegramNotifier:
         if ev.token_id:
             lines.append(f"token: {ev.token_id}")
         if ev.old_price is not None and ev.new_price is not None and ev.old_price != ev.new_price:
-            lines.append(f"价格: {ev.old_price:.4f} -> {ev.new_price:.4f}")
+            lines.append(f"价格: {_fmt_amt(ev.old_price)} -> {_fmt_amt(ev.new_price)}")
         elif ev.new_price is not None:
-            lines.append(f"价格: {ev.new_price:.4f}")
+            lines.append(f"价格: {_fmt_amt(ev.new_price)}")
         elif ev.old_price is not None:
-            lines.append(f"价格: {ev.old_price:.4f}")
+            lines.append(f"价格: {_fmt_amt(ev.old_price)}")
         if ev.size is not None:
             lines.append(f"份额: {ev.size:g}")
         if ev.inventory is not None:
-            lines.append(f"库存: {ev.inventory:.4f}")
+            lines.append(f"库存: {_fmt_amt(ev.inventory)}")
         lines.append(f"状态: {ev.scoring_status_text}")
         if ev.reason:
             lines.append(f"原因: {pricing_adjustment_reason_zh(ev.reason)}")
@@ -463,21 +471,21 @@ class TelegramNotifier:
             ref_line = "累计入账（参考）: 未配置"
             pnl_line = "盈亏（相对入账参考）: 暂不计算（需先配置入账参考）"
         else:
-            ref_line = f"累计入账（参考）: {deposited_reference_usdc:.4f} USDC"
+            ref_line = f"累计入账（参考）: {_fmt_amt(deposited_reference_usdc)} USDC"
             p = float(pnl_usdc or 0.0)
             sign = "+" if p >= 0 else ""
-            pnl_line = f"盈亏（相对入账参考）: {sign}{p:.4f} USDC"
+            pnl_line = f"盈亏（相对入账参考）: {sign}{_fmt_amt(p)} USDC"
         lines = [
             f"[{self._account_label}]",
             "事件: 程序启动 · 账户资金快照",
             ref_line,
-            f"当前账户总额（组合≈）: {total_account_usdc:.4f} USDC",
+            f"当前账户总额（组合≈）: {_fmt_amt(total_account_usdc)} USDC",
         ]
         if clob_collateral_usdc is not None:
-            lines.append(f"CLOB 抵押 USDC: {float(clob_collateral_usdc):.4f} USDC")
+            lines.append(f"CLOB 抵押 USDC: {_fmt_amt(float(clob_collateral_usdc))} USDC")
             if positions_market_value_usdc is not None:
                 lines.append(
-                    f"持仓市值（Data API）: {float(positions_market_value_usdc):.4f} USDC"
+                    f"持仓市值（Data API）: {_fmt_amt(float(positions_market_value_usdc))} USDC"
                 )
             elif (positions_error_zh or "").strip():
                 lines.append(
@@ -485,8 +493,8 @@ class TelegramNotifier:
                 )
         lines.extend(
             [
-                f"当前可用余额（CLOB 可开新单≈）: {available_balance_usdc:.4f} USDC",
-                f"未成交买单占用: {locked_open_buy_usdc:.4f} USDC",
+                f"当前可用余额（CLOB 可开新单≈）: {_fmt_amt(available_balance_usdc)} USDC",
+                f"未成交买单占用: {_fmt_amt(locked_open_buy_usdc)} USDC",
                 pnl_line,
             ]
         )
@@ -513,20 +521,20 @@ class TelegramNotifier:
             ref_line = "入账参考: 未配置"
             pnl_line = "盈亏（相对入账参考）: 暂不计算（需先配置入账参考）"
         else:
-            ref_line = f"入账参考: {deposited_reference_usdc:.4f} USDC"
+            ref_line = f"入账参考: {_fmt_amt(deposited_reference_usdc)} USDC"
             p = float(pnl_usdc or 0.0)
             sign = "+" if p >= 0 else ""
-            pnl_line = f"盈亏（相对入账参考）: {sign}{p:.4f} USDC"
+            pnl_line = f"盈亏（相对入账参考）: {sign}{_fmt_amt(p)} USDC"
         lines = [
             f"[{self._account_label}]",
             f"定期摘要（半点/整点 · {time_label}）",
-            f"账户总额（组合≈）: {total_account_usdc:.4f} USDC",
+            f"账户总额（组合≈）: {_fmt_amt(total_account_usdc)} USDC",
         ]
         if clob_collateral_usdc is not None:
-            lines.append(f"CLOB 抵押: {float(clob_collateral_usdc):.4f} USDC")
+            lines.append(f"CLOB 抵押: {_fmt_amt(float(clob_collateral_usdc))} USDC")
             if positions_market_value_usdc is not None:
                 lines.append(
-                    f"持仓市值: {float(positions_market_value_usdc):.4f} USDC"
+                    f"持仓市值: {_fmt_amt(float(positions_market_value_usdc))} USDC"
                 )
             elif (positions_error_zh or "").strip():
                 lines.append(
@@ -534,7 +542,7 @@ class TelegramNotifier:
                 )
         lines.extend(
             [
-                f"可用余额（CLOB≈）: {available_balance_usdc:.4f} USDC",
+                f"可用余额（CLOB≈）: {_fmt_amt(available_balance_usdc)} USDC",
                 ref_line,
                 pnl_line,
             ]
@@ -560,7 +568,7 @@ class TelegramNotifier:
             "事件: 订单已撤销",
             f'盘口: "{market_title}"',
             f"方向: {outcome or '—'}",
-            f"价格: {price:.4f}",
+            f"价格: {_fmt_amt(price)}",
             f"份额: {size:g}",
             f"撤单类别: {category_zh}",
             f"说明: {detail_zh}",

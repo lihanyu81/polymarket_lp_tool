@@ -178,6 +178,9 @@ class PassiveConfig:
     ws_stale_sec: float = 25.0
     ws_reconcile_every_loops: int = 15
     ws_telegram_transport_alerts: bool = True
+    # When True, orders without a Telegram-stored rule use PASSIVE_CUSTOM_* as the pricing profile
+    # (same as listing every order in PASSIVE_CUSTOM_ORDER_IDS). Stored rules still win per token+side.
+    default_custom_pricing_from_env: bool = False
     # Custom pricing (simple_price_policy): only orders listed in custom_pricing_order_ids.
     custom_pricing_order_ids: frozenset[str] = field(default_factory=frozenset)
     custom_coarse_tick_offset_from_mid: int = 1
@@ -485,6 +488,10 @@ class PassiveConfig:
             ws_telegram_transport_alerts=b(
                 "PASSIVE_WS_TELEGRAM_TRANSPORT",
                 cls.ws_telegram_transport_alerts,
+            ),
+            default_custom_pricing_from_env=b(
+                "PASSIVE_DEFAULT_CUSTOM_PRICING",
+                cls.default_custom_pricing_from_env,
             ),
             custom_pricing_order_ids=_parse_custom_order_ids(
                 os.environ.get("PASSIVE_CUSTOM_ORDER_IDS")

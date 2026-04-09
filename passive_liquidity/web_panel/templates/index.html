@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}概览{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>实时状态（等同 Telegram /status）</h2>
+  {% if ok %}
+  <pre class="status">{% for line in status_lines %}{{ line }}
+{% endfor %}</pre>
+  {% else %}
+  <p class="flash error">{{ error }}</p>
+  {% endif %}
+</div>
+<p class="muted">账户标签: {{ account_label }}</p>
+{% endblock %}

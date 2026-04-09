@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}挂单{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>操作</h2>
+  <form class="inline" method="post" action="{{ url_for('cancel_all') }}" onsubmit="return confirm('确定取消全部未成交单？');">
+    <button type="submit" class="danger">取消全部挂单</button>
+  </form>
+</div>
+{% if summary_ok %}
+<details class="card">
+  <summary style="cursor:pointer;color:var(--muted);font-size:0.9rem">文本摘要（与 Telegram /orders 一致）</summary>
+  <pre class="status" style="margin-top:0.75rem">{{ summary_text }}</pre>
+</details>
+{% else %}
+<div class="flash error">{{ summary_error }}</div>
+{% endif %}
+<div class="card">
+  <h2>挂单列表（{{ rows|length }} 笔）</h2>
+  {% if rows|length == 0 %}
+  <p class="muted">当前无挂单。</p>
+  {% else %}
+  <div style="overflow-x:auto">
+    <table class="orders">
+      <thead>
+        <tr>
+          <th>盘口</th>
+          <th>order_id</th>
+          <th>方向</th>
+          <th>价</th>
+          <th>量</th>
+          <th>奖励带</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.market_title }}</td>
+          <td><code>{{ r.order_id }}</code></td>
+          <td>{{ r.side }}</td>
+          <td>{{ "%.4f" % r.price }}</td>
+          <td>{{ "%.4f" % r.size }}</td>
+          <td class="muted" style="max-width:280px;font-size:0.78rem">{{ r.reward_note or '—' }}</td>
+          <td>
+            <div class="order-actions-row">
+              {% if r.token_id and r.side in ('BUY', 'SELL') %}
+              <button type="button" class="btn btn-compact" data-open-order-rule data-token-id="{{ r.token_id }}" data-side="{{ r.side }}">自定义规则</button>
+              {% endif %}
+              <form class="inline" method="post" action="{{ url_for('cancel_order') }}" onsubmit="return confirm('取消该笔订单？');">
+                <input type="hidden" name="order_id" value="{{ r.order_id }}">
+                <button type="submit" class="danger btn-compact">取消</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<div id="order-rule-modal" class="modal-overlay" aria-hidden="true" role="presentation">
+  <div class="modal-box" role="dialog" aria-labelledby="order-rule-modal-title" aria-modal="true">
+    <div class="modal-head">
+      <h3 id="order-rule-modal-title" style="margin:0;font-size:1rem">自定义规则</h3>
+      <button type="button" class="modal-close" id="order-rule-modal-close" aria-label="关闭">×</button>
+    </div>
+    <p class="muted" id="order-rule-meta" style="margin:0.5rem 0 0.75rem;font-size:0.82rem">加载中…</p>
+    <form id="order-rule-save-form" method="post" action="{{ url_for('rules_add') }}">
+      <input type="hidden" name="redirect" value="orders">
+      <input type="hidden" name="token_id" id="order-rule-token-id">
+      <input type="hidden" name="side" id="order-rule-side-hidden">
+      <label for="order-rule-tick-regime">tick 模式（与机器人 classify_custom_tick_regime 一致；可手动改）</label>
+      <select id="order-rule-tick-regime" name="tick_regime">
+        <option value="coarse">coarse（粗 tick）</option>
+        <option value="fine">fine（细 tick）</option>
+      </select>
+      <div id="order-rule-coarse" class="rule-modal-section">
+        <p class="rule-modal-section-title">粗 tick 参数</p>
+        <div class="rule-grid" style="margin-top:0.35rem">
+          <div>
+            <label>离 mid 第 N 档</label>
+            <input type="number" name="coarse_tick_offset_from_mid" id="order-rule-coarse-offset" value="1" min="1">
+          </div>
+          <div>
+            <label>允许顶档</label>
+            <label style="display:flex;align-items:center;gap:0.4rem;margin-top:0.25rem">
+              <input type="checkbox" name="coarse_allow_top_of_book" id="order-rule-coarse-top"> coarse_allow_top_of_book
+            </label>
+          </div>
+          <div>
+            <label>最少簿上候选档位数</label>
+            <input type="number" name="coarse_min_candidate_levels" id="order-rule-coarse-levels" value="1" min="1">
+          </div>
+        </div>
+      </div>
+      <div id="order-rule-fine" class="rule-modal-section">
+        <p class="rule-modal-section-title">细 tick 参数</p>
+        <div class="rule-grid" style="margin-top:0.35rem">
+          <div>
+            <label>safe 带 min</label>
+            <input type="number" step="0.01" name="fine_safe_band_min" id="order-rule-fine-min" value="0.4">
+          </div>
+          <div>
+            <label>safe 带 max</label>
+            <input type="number" step="0.01" name="fine_safe_band_max" id="order-rule-fine-max" value="0.6">
+          </div>
+          <div>
+            <label>目标 band 比例</label>
+            <input type="number" step="0.01" name="fine_target_band_ratio" id="order-rule-fine-ratio" value="0.5">
+          </div>
+        </div>
+      </div>
+      <p style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center">
+        <button type="submit">保存规则</button>
+      </p>
+    </form>
+    <form id="order-rule-delete-form" method="post" action="{{ url_for('rules_delete') }}" style="margin-top:0.35rem" onsubmit="return confirm('确定删除该 token+side 的自定义规则？');">
+      <input type="hidden" name="redirect" value="orders">
+      <input type="hidden" name="token_id" id="order-rule-del-token-id">
+      <input type="hidden" name="side" id="order-rule-del-side">
+      <button type="submit" class="danger">删除规则</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var overlay = document.getElementById('order-rule-modal');
+  if (!overlay) return;
+  var meta = document.getElementById('order-rule-meta');
+  var saveForm = document.getElementById('order-rule-save-form');
+  var delForm = document.getElementById('order-rule-delete-form');
+  var selRegime = document.getElementById('order-rule-tick-regime');
+  var secCoarse = document.getElementById('order-rule-coarse');
+  var secFine = document.getElementById('order-rule-fine');
+  var inpToken = document.getElementById('order-rule-token-id');
+  var inpSideH = document.getElementById('order-rule-side-hidden');
+  var delTok = document.getElementById('order-rule-del-token-id');
+  var delSide = document.getElementById('order-rule-del-side');
+  var btnClose = document.getElementById('order-rule-modal-close');
+
+  function pick(rule, def, key) {
+    if (rule && rule[key] !== undefined && rule[key] !== null) return rule[key];
+    return def[key];
+  }
+
+  function setRegimeSections() {
+    var v = selRegime.value;
+    secCoarse.style.display = v === 'coarse' ? 'block' : 'none';
+    secFine.style.display = v === 'fine' ? 'block' : 'none';
+  }
+
+  function closeModal() {
+    overlay.classList.remove('is-open');
+    overlay.setAttribute('aria-hidden', 'true');
+  }
+
+  selRegime.addEventListener('change', setRegimeSections);
+  btnClose.addEventListener('click', closeModal);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeModal();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && overlay.classList.contains('is-open')) closeModal();
+  });
+
+  document.querySelectorAll('[data-open-order-rule]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var tokenId = btn.getAttribute('data-token-id') || '';
+      var side = btn.getAttribute('data-side') || '';
+      inpToken.value = tokenId;
+      inpSideH.value = side;
+      delTok.value = tokenId;
+      delSide.value = side;
+      overlay.classList.add('is-open');
+      overlay.setAttribute('aria-hidden', 'false');
+      meta.textContent = '加载中…';
+      var u = new URL('{{ url_for("api_order_custom_rule") }}', window.location.origin);
+      u.searchParams.set('token_id', tokenId);
+      u.searchParams.set('side', side);
+      fetch(u.toString())
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (!res.ok) {
+            meta.textContent = res.j.error || '请求失败';
+            return;
+          }
+          var data = res.j;
+          var rule = data.rule;
+          var d = data.defaults;
+          selRegime.value = data.form_regime === 'fine' ? 'fine' : 'coarse';
+          document.getElementById('order-rule-coarse-offset').value = String(pick(rule, d, 'coarse_tick_offset_from_mid'));
+          document.getElementById('order-rule-coarse-top').checked = !!pick(rule, d, 'coarse_allow_top_of_book');
+          document.getElementById('order-rule-coarse-levels').value = String(pick(rule, d, 'coarse_min_candidate_levels'));
+          document.getElementById('order-rule-fine-min').value = String(pick(rule, d, 'fine_safe_band_min'));
+          document.getElementById('order-rule-fine-max').value = String(pick(rule, d, 'fine_safe_band_max'));
+          document.getElementById('order-rule-fine-ratio').value = String(pick(rule, d, 'fine_target_band_ratio'));
+          var sug = data.suggested_regime ? ('盘口推断: ' + data.suggested_regime) : '无法拉取盘口（可手动选 tick 模式）';
+          var tick = data.effective_tick != null ? ('，有效 tick≈' + data.effective_tick) : '';
+          var saved = rule ? '已保存规则（可改后覆盖）' : '尚无保存规则（默认填环境变量）';
+          meta.textContent = saved + ' · ' + side + ' · ' + sug + tick;
+          setRegimeSections();
+        })
+        .catch(function (e) {
+          meta.textContent = '加载失败: ' + e;
+          setRegimeSections();
+        });
+    });
+  });
+})();
+</script>
+{% endblock %}

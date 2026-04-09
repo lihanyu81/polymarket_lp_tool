@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}盈亏{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>实时盈亏（等同 Telegram /pnl）</h2>
+  {% if ok %}
+  <pre class="status">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+  {% else %}
+  <p class="flash error">{{ error }}</p>
+  {% endif %}
+</div>
+{% endblock %}

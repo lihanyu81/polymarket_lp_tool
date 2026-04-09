@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}@臭臭Panda控制台{% endblock %} — Polymarket 被动监控</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="wrap">
+    {% block header %}
+    <header class="top">
+      <h1>Polymarket 被动监控 · Web</h1>
+      <nav>
+        <a href="{{ url_for('index') }}">概览</a>
+        <a href="{{ url_for('orders_page') }}">挂单</a>
+        <a href="{{ url_for('pnl_page') }}">盈亏</a>
+        <a href="{{ url_for('rules_page') }}">自定义规则</a>
+        <a href="{{ url_for('logout') }}">退出</a>
+      </nav>
+    </header>
+    {% endblock %}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    {% block body %}{% endblock %}
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

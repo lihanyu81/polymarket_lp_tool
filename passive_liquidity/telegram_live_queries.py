@@ -18,6 +18,7 @@ from passive_liquidity.account_portfolio import (
 )
 from passive_liquidity.bridge_deposits import fetch_bridge_polygon_usdc_deposits
 from passive_liquidity.market_display import MarketDisplayResolver
+from passive_liquidity.orderbook_fetcher import OrderBookFetcher
 from passive_liquidity.order_manager import (
     OrderManager,
     _oid,
@@ -27,6 +28,13 @@ from passive_liquidity.order_manager import (
     _token_id,
 )
 from passive_liquidity.polygon_deposits import fetch_polygon_usdc_deposit_summary
+from passive_liquidity.reward_monitor import RewardMonitor
+from passive_liquidity.simple_price_policy import (
+    classify_tick_regime,
+    fine_reward_display_lo_hi,
+    fine_tick_display_decimals,
+    list_coarse_reward_book_candidates,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -180,6 +188,8 @@ def get_live_order_summary(
     client: Any,
     order_manager: OrderManager,
     market_display: Optional[MarketDisplayResolver] = None,
+    book_fetcher: Optional[OrderBookFetcher] = None,
+    reward_monitor: Optional[RewardMonitor] = None,
 ) -> Tuple[bool, str]:
     try:
         orders = order_manager.fetch_all_open_orders(client)
@@ -217,6 +227,54 @@ def get_live_order_summary(
         lines.append(f"{shown}) 盘口: {market_title}")
         lines.append(f"   order_id={oid}")
         lines.append(f"   side={su}  price={px}  size={sz}")
+        if reward_monitor is not None and book_fetcher is not None and cid and tid:
+            try:
+                book = book_fetcher.get_orderbook(tid)
+                mid = book.mid
+                if mid is None:
+                    mid = book_fetcher.mid_price(tid)
+                if mid is not None:
+                    max_spread = reward_monitor.get_rewards_max_spread_for_market(cid)
+                    rr = reward_monitor.get_reward_range(float(mid), float(max_spread))
+                    t = max(float(book.tick_size or 0.01), 1e-12)
+                    reg = classify_tick_regime(t)
+                    if reg == "coarse":
+                        # Coarse: only resting book prices in the reward half-band (near-mid→far),
+                        # aligned with custom coarse N and default coarse candidates.
+                        lo, hi, book_lv = list_coarse_reward_book_candidates(
+                            str(su).upper(),
+                            float(rr.mid),
+                            float(rr.delta),
+                            t,
+                            book.bids,
+                            book.asks,
+                        )
+                        if book_lv:
+                            levels_s = ",".join(f"{p:.2f}" for p in book_lv)
+                            lines.append(
+                                f"   可得奖励档位({str(su).upper()})簿上≈[{levels_s}]"
+                                f"（扫描[{lo:.4f},{hi:.4f}] mid={rr.mid:.4f}, δ={rr.delta:.4f}, tick={t:.4f}）"
+                            )
+                        else:
+                            lines.append(
+                                f"   奖励扫描≈[{lo:.4f}, {hi:.4f}] 簿上无同侧正深度档位"
+                                f"（mid={rr.mid:.4f}, δ={rr.delta:.4f}）"
+                            )
+                    else:
+                        lo_d, hi_d, _ = fine_reward_display_lo_hi(
+                            float(rr.mid),
+                            float(rr.delta),
+                            t,
+                            book.bids,
+                            book.asks,
+                        )
+                        dec = fine_tick_display_decimals(t)
+                        lines.append(
+                            f"   奖励区间≈[{lo_d:.{dec}f}, {hi_d:.{dec}f}]"
+                            f"（mid={rr.mid:.4f}, δ={rr.delta:.4f}）"
+                        )
+            except Exception as e:
+                LOG.debug("live /orders reward range failed oid=%s: %s", oid[:16], e)
     if shown == 0:
         lines.append("（未能解析订单 id）")
     return True, "\n".join(lines)
