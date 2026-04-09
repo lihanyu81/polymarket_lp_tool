@@ -214,21 +214,54 @@ def fine_reward_display_lo_hi(
     tick: float,
     bids: list[Any],
     asks: list[Any],
+    side: Optional[str] = None,
 ) -> tuple[float, float, bool]:
     """
     Fine-tick reward *display* interval.
 
-    Symmetric band [mid−δ, mid+δ] (clipped to valid outcome range).
+    When ``side`` is ``BUY`` or ``SELL``, uses the same **half-band** as pricing
+    (``_eligible_band_lo_hi`` fine branch): BUY scans ``[mid−δ, mid]`` on **bids**
+    only; SELL scans ``[mid, mid+δ]`` on **asks** only. This avoids showing an
+    upper bound from the opposite side (e.g. asks near ``mid+δ``) that is not
+    in the reward zone for that order.
 
-    - If any bid or ask with positive size lies in that band: return
-      (min price, max price) among those resting levels (tick-rounded), and True.
-    - Else: return the band edges snapped **inward** to the tick grid
-      (ceil lower bound, floor upper bound) so e.g. 0.9215→0.922, 0.9915→0.991
-      at tick=0.001; and False.
+    When ``side`` is omitted, keeps legacy behavior: symmetric ``[mid−δ, mid+δ]``
+    merged across bids and asks (min/max resting in band).
+
+    - If any relevant level lies in the clipped band: return (min, max) among
+      those prices (tick-rounded), and True.
+    - Else: return band edges snapped **inward** to the tick grid; and False.
     """
     m = float(mid)
     d = max(0.0, float(delta))
     t = max(float(tick), 1e-12)
+    side_u = str(side).strip().upper() if side is not None else ""
+
+    if side_u in ("BUY", "SELL"):
+        band = max(d, 1e-12)
+        if side_u == "BUY":
+            raw_lo, raw_hi = m - band, m
+        else:
+            raw_lo, raw_hi = m, m + band
+        if raw_lo > raw_hi:
+            raw_lo, raw_hi = raw_hi, raw_lo
+        clip_lo = max(t, min(1.0 - t, raw_lo))
+        clip_hi = max(t, min(1.0 - t, raw_hi))
+        if clip_lo > clip_hi + 1e-15:
+            return clip_lo, clip_hi, False
+        levels = bids if side_u == "BUY" else asks
+        prices = _book_prices_in_range(side_u, levels, clip_lo, clip_hi, t)
+        if prices:
+            return float(prices[0]), float(prices[-1]), True
+        k_lo = int(math.ceil(clip_lo / t - 1e-9))
+        k_hi = int(math.floor(clip_hi / t + 1e-9))
+        lo_d = max(t, min(1.0 - t, k_lo * t))
+        hi_d = max(t, min(1.0 - t, k_hi * t))
+        if lo_d > hi_d + 1e-12:
+            lo_d = _round_tick(clip_lo, t)
+            hi_d = _round_tick(clip_hi, t)
+        return lo_d, hi_d, False
+
     raw_lo = m - d
     raw_hi = m + d
     clip_lo = max(t, min(1.0 - t, raw_lo))

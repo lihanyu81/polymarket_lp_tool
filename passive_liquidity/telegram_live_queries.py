@@ -279,12 +279,18 @@ def get_live_order_summary(
                                 f"（mid={rr.mid:.4f}, δ={rr.delta:.4f}）"
                             )
                     else:
+                        side_fine = (
+                            str(su).upper()
+                            if str(su).upper() in ("BUY", "SELL")
+                            else None
+                        )
                         lo_d, hi_d, _ = fine_reward_display_lo_hi(
                             float(rr.mid),
                             float(rr.delta),
                             t_reward,
                             book.bids,
                             book.asks,
+                            side=side_fine,
                         )
                         dec = fine_tick_display_decimals(t_reward)
                         lines.append(
