@@ -18,7 +18,11 @@ from passive_liquidity.account_portfolio import (
 )
 from passive_liquidity.bridge_deposits import fetch_bridge_polygon_usdc_deposits
 from passive_liquidity.market_display import MarketDisplayResolver
-from passive_liquidity.orderbook_fetcher import OrderBookFetcher
+from passive_liquidity.orderbook_fetcher import (
+    OrderBookFetcher,
+    pricing_tick_for_order_like_main_loop,
+    resolve_effective_tick_size,
+)
 from passive_liquidity.order_manager import (
     OrderManager,
     _oid,
@@ -236,8 +240,21 @@ def get_live_order_summary(
                 if mid is not None:
                     max_spread = reward_monitor.get_rewards_max_spread_for_market(cid)
                     rr = reward_monitor.get_reward_range(float(mid), float(max_spread))
-                    t = max(float(book.tick_size or 0.01), 1e-12)
-                    reg = classify_tick_regime(t)
+                    t_book_eff = max(
+                        float(
+                            resolve_effective_tick_size(
+                                book.tick_size, book.bids, book.asks
+                            )
+                        ),
+                        1e-12,
+                    )
+                    t_reward = pricing_tick_for_order_like_main_loop(
+                        book_tick_size=book.tick_size,
+                        bids=book.bids,
+                        asks=book.asks,
+                        order_price=float(px),
+                    )
+                    reg = classify_tick_regime(t_book_eff)
                     if reg == "coarse":
                         # Coarse: only resting book prices in the reward half-band (near-mid→far),
                         # aligned with custom coarse N and default coarse candidates.
@@ -245,15 +262,16 @@ def get_live_order_summary(
                             str(su).upper(),
                             float(rr.mid),
                             float(rr.delta),
-                            t,
+                            t_reward,
                             book.bids,
                             book.asks,
                         )
                         if book_lv:
-                            levels_s = ",".join(f"{p:.2f}" for p in book_lv)
+                            dec = fine_tick_display_decimals(t_reward)
+                            levels_s = ",".join(f"{p:.{dec}f}" for p in book_lv)
                             lines.append(
                                 f"   可得奖励档位({str(su).upper()})簿上≈[{levels_s}]"
-                                f"（扫描[{lo:.4f},{hi:.4f}] mid={rr.mid:.4f}, δ={rr.delta:.4f}, tick={t:.4f}）"
+                                f"（扫描[{lo:.4f},{hi:.4f}] mid={rr.mid:.4f}, δ={rr.delta:.4f}, tick={t_reward:.4f}）"
                             )
                         else:
                             lines.append(
@@ -264,11 +282,11 @@ def get_live_order_summary(
                         lo_d, hi_d, _ = fine_reward_display_lo_hi(
                             float(rr.mid),
                             float(rr.delta),
-                            t,
+                            t_reward,
                             book.bids,
                             book.asks,
                         )
-                        dec = fine_tick_display_decimals(t)
+                        dec = fine_tick_display_decimals(t_reward)
                         lines.append(
                             f"   奖励区间≈[{lo_d:.{dec}f}, {hi_d:.{dec}f}]"
                             f"（mid={rr.mid:.4f}, δ={rr.delta:.4f}）"

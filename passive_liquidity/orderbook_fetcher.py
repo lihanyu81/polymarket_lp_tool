@@ -108,6 +108,34 @@ def resolve_effective_tick_size(
     return _resolve_tick_size(api_tick, bids, asks)
 
 
+def pricing_tick_for_order_like_main_loop(
+    *,
+    book_tick_size: Any,
+    bids: list[Any],
+    asks: list[Any],
+    order_price: float,
+) -> float:
+    """Match ``main_loop`` tick before ``decide_simple_price`` for this order.
+
+    1. ``resolve_effective_tick_size`` on the current book tick + L2 (same as loop
+       after optional WS tick overlay).
+    2. If tick looks coarse (``> 0.005``) but the **order price** has sub-cent
+       precision, force ``0.001`` (same as the order-price branch in ``main_loop``).
+
+    Reward-band hints (Telegram/Web) must use this so coarse 第 N 档 lines up
+    with custom coarse pricing.
+    """
+    t = float(_resolve_tick_size(book_tick_size, bids, asks))
+    if t <= 0:
+        t = max(float(book_tick_size or 0.01), 1e-12)
+    t = max(t, 1e-12)
+    if t > 0.005:
+        cents = float(order_price) * 100.0
+        if abs(cents - round(cents)) > 1e-7:
+            return max(0.001, 1e-12)
+    return t
+
+
 def _resolve_tick_size(
     api_tick: Any,
     bids: list[Any],
