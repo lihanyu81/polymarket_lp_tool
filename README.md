@@ -11,7 +11,7 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 1. **白名单**：若设置 `PASSIVE_TOKEN_WHITELIST`，则仅以环境变量为准（运行中不随挂单变化）。若未设置，则从当前未成交单提取 `token_id`，并默认每 **120 秒**（`PASSIVE_WHITELIST_REFRESH_SEC`）用未成交单刷新，以便启动后新挂的单可被纳入；设为 `0` 则仅在启动时种子一次。
 2. **过滤**：仅管理白名单内订单；若该 `token_id` **已有持仓**（`abs(inventory) > 1e-8`），则**整 token 不处理**（不撤、不改、不进 fill 推断与周期摘要明细）。
-3. **调价**：仅 `passive_liquidity/simple_price_policy.py` 中的 **`decide_simple_price`**（粗 tick / 细 tick；见下文）。若该 `token_id`+方向在 **Telegram 保存了自定义规则**，或订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`**，或开启 **`PASSIVE_DEFAULT_CUSTOM_PRICING`**，则进入 **custom** 分支（用 `.env` 的 **`PASSIVE_CUSTOM_*`**；持久化规则优先）。**不再**使用 `AdjustmentEngine`、结构性风控、fill risk、按积分微调、按库存调价等旧逻辑（相关文件仍留在仓库，主循环不调用）。
+3. **调价**：仅 `passive_liquidity/simple_price_policy.py` 中的 **`decide_simple_price`**（粗 tick / 细 tick；见下文）。若该 `token_id`+方向在 **Telegram 或 Web 控制台写入了同一 JSON 自定义规则**，或订单 id 列入 **`PASSIVE_CUSTOM_ORDER_IDS`**，或开启 **`PASSIVE_DEFAULT_CUSTOM_PRICING`**，则进入 **custom** 分支（用 `.env` 的 **`PASSIVE_CUSTOM_*`**；持久化规则优先）。**不再**使用 `AdjustmentEngine`、结构性风控、fill risk、按积分微调、按库存调价等旧逻辑（相关文件仍留在仓库，主循环不调用）。
 4. **执行**：`OrderManager.apply_decision`（撤单、撤单后延迟、挂单失败可无限重试或限次，由配置决定）。
 5. **可选**：成交推断 Telegram、半点资金摘要、周期性 **band + 盘口深度** 摘要。
 
@@ -43,15 +43,15 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 订单事件与部分 Telegram 文案中，原因码会显示为**中文说明**（`pricing_adjustment_reason_zh`）。
 
-## 自定义调价（Telegram / 环境变量）
+## 自定义调价（Telegram / Web / 环境变量）
 
-在默认粗/细 tick 规则之外，可对**指定订单或整 token+方向**使用固定逻辑（仍由主循环撤单改价，程序不新建首单）。
+在默认粗/细 tick 规则之外，可对**指定 token+方向**使用固定逻辑（仍由主循环撤单改价，程序不新建首单）。**Telegram `/set_rule` 与 Web 挂单页的「自定义规则」**写入**同一份** `custom_pricing_rules.json`（路径 **`PASSIVE_CUSTOM_RULES_PATH`**；已在 `.gitignore` 中忽略）。机器人与网页若**同时**改该文件，存在竞态，建议单点编辑。
 
 **生效优先级（同一订单）**
 
-1. 已为该 **`token_id` + `BUY`/`SELL`** 在 Telegram **保存规则** → 使用持久化规则（`custom_pricing_rules.json`，路径可由 **`PASSIVE_CUSTOM_RULES_PATH`** 覆盖；文件已在 `.gitignore` 中忽略）。
+1. 已为该 **`token_id` + `BUY`/`SELL`** **保存规则**（Telegram 或 Web）→ 使用持久化 JSON 规则。
 2. 否则，若 **`PASSIVE_DEFAULT_CUSTOM_PRICING=true`** → 使用 **`.env` 里 `PASSIVE_CUSTOM_*`** 作为**全局默认**自定义参数（不必再列 `PASSIVE_CUSTOM_ORDER_IDS`）。
-3. 否则，若订单 id 在 **`PASSIVE_CUSTOM_ORDER_IDS`**（逗号分隔，与 CLOB 返回 id 完全一致）→ 使用同一套 **`PASSIVE_CUSTOM_*`**。
+3. 否则，若订单 id 在 **`PASSIVE_CUSTOM_ORDER_IDS`**（逗号分隔，与 CLOB 返回 id 完全一致）→ 使用同一套 **`PASSIVE_CUSTOM_*`**（无 JSON 规则时）。
 4. 否则 → 上节**内置**粗/细 tick 策略（非 custom）。
 
 **Telegram 交互**（需 **`TELEGRAM_ENABLED=true`** 且 **`TELEGRAM_COMMANDS_ENABLED`** 未设为关闭；命令由 `telegram_command_poller` 轮询处理）
@@ -75,7 +75,7 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 
 **环境变量一览（`PASSIVE_CUSTOM_*` 与默认开关）**
 
-当 **`PASSIVE_DEFAULT_CUSTOM_PRICING=true`**，或订单在 **`PASSIVE_CUSTOM_ORDER_IDS`** 中，且**没有** Telegram 持久化规则时，下列参数作为自定义调价；**`/set_rule`** 保存的规则仍优先，且规则内自带一份快照（不再读 env 粗/细项）。
+当 **`PASSIVE_DEFAULT_CUSTOM_PRICING=true`**，或订单在 **`PASSIVE_CUSTOM_ORDER_IDS`** 中，且**没有** JSON 持久化规则时，下列参数作为自定义调价；**Telegram / Web 保存的规则**仍优先，且规则内自带一份快照（不再读 env 粗/细项）。
 
 | 变量 | 含义 | 默认（未设置 env 时） |
 | --- | --- | --- |
@@ -105,12 +105,13 @@ Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.c
 | **TelegramNotifier** | `passive_liquidity/telegram_notifier.py` | 各类中文通知、运营警告、原因码映射 |
 | **AccountPortfolio** | `passive_liquidity/account_portfolio.py` | CLOB collateral 快照；**总额=API collateral**，不将未成交买单占用加回总额 |
 | **ConfigManager** | `passive_liquidity/config_manager.py` | `PassiveConfig` + 环境变量 |
-| **CustomPricingRulesStore** | `passive_liquidity/custom_pricing_rules_store.py` | Telegram 规则 JSON 读写（按 `token_id`+方向键） |
+| **CustomPricingRulesStore** | `passive_liquidity/custom_pricing_rules_store.py` | 自定义规则 JSON 读写（按 `token_id`+方向键；Telegram 与 Web 共用） |
+| **Web 控制台** | `passive_liquidity/web_panel/`、`run_web_panel.py` | 可选 Flask：概览、挂单、盈亏、规则页；挂单行内弹窗编辑/删除规则（与 Telegram 同一存储） |
 | **TelegramRuleSetup** | `passive_liquidity/telegram_rule_setup.py` | `/set_rule` 等多步 FSM 与 `/get_rule`、`/clear_rule` |
 | **TelegramCommandPoller** | `passive_liquidity/telegram_command_poller.py` | 命令与 `/input`；`telegram_live_queries` 提供 `/status`、`/orders`、`/pnl` |
 | **AdjustmentEngine** / **structural_risk** 等 | 遗留代码 | **主循环未使用** |
 
-入口：`run_passive_bot.py`，或 `python -m passive_liquidity.main_loop`。
+入口：`run_passive_bot.py`，或 `python -m passive_liquidity.main_loop`。Web 控制台：`run_web_panel.py`（见下文）。
 
 ## 安装
 
@@ -203,6 +204,33 @@ python run_passive_bot.py
 ```bash
 python -m passive_liquidity.main_loop
 ```
+
+### Web 控制台（可选）
+
+只读/管理类页面，**不替代**主循环；调价仍由 `run_passive_bot.py` 执行。与机器人**共用**项目根目录 `.env`（含 `PRIVATE_KEY` 等，请妥善保管）。
+
+1. 在 `.env` 中设置 **`WEB_PANEL_TOKEN`**（登录密码，请用强随机串）。
+2. 安装依赖已包含 `flask`（见 `requirements.txt`）。
+3. 启动：
+
+```bash
+cd polymarket_lp_tool
+source .venv/bin/activate
+python run_web_panel.py
+```
+
+默认 **`WEB_PANEL_HOST=127.0.0.1`**、**`WEB_PANEL_PORT=8765`**。浏览器打开 `http://127.0.0.1:8765`，用 `WEB_PANEL_TOKEN` 登录。
+
+| 变量 | 含义 |
+| --- | --- |
+| **`WEB_PANEL_TOKEN`** | 必填；会话登录密码 |
+| **`WEB_PANEL_HOST`** | 监听地址，默认本机 |
+| **`WEB_PANEL_PORT`** | 端口，默认 `8765` |
+| **`WEB_PANEL_SECRET_KEY`** | 可选；Flask session 签名密钥（不设则从 token 派生） |
+
+**页面**：概览、挂单、盈亏、自定义规则列表。挂单表中每笔可点 **「自定义规则」**：弹窗拉取当前盘口推断的粗/细 tick（`classify_custom_tick_regime`），展示已存规则或 `.env` 默认 **`PASSIVE_CUSTOM_*`**，可保存或删除；保存/删除后返回挂单页（`redirect=orders`）。内部接口 **`GET /api/order_custom_rule`**（需已登录）。
+
+若需公网访问，请在本机反代 + HTTPS，**勿**把无防护面板直接绑 `0.0.0.0` 暴露到公网。
 
 ### 使用 tmux（SSH 断开后仍运行）
 
