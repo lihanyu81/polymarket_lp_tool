@@ -10,6 +10,10 @@ from passive_liquidity.models import AdjustmentDecision, QuotePlan
 LOG = logging.getLogger(__name__)
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 @dataclass
 class ApplyDecisionResult:
     """Outcome of apply_decision for telemetry / Telegram."""
@@ -98,7 +102,12 @@ class OrderManager:
 
         if decision.action == "cancel":
             try:
-                LOG.info("Cancel order %s (%s)", oid[:20], decision.reason)
+                LOG.info(
+                    "ORDER_CANCEL_MS event=cancel_by_rule ts_ms=%d order_id=%s reason=%s",
+                    _now_ms(),
+                    oid[:20],
+                    decision.reason,
+                )
                 client.cancel(oid)
                 return ApplyDecisionResult(
                     "canceled_ok",
@@ -156,6 +165,12 @@ class OrderManager:
                 sz,
                 decision.reason,
             )
+            LOG.info(
+                "ORDER_CANCEL_MS event=replace_cancel ts_ms=%d order_id=%s reason=%s",
+                _now_ms(),
+                oid[:20],
+                decision.reason,
+            )
             client.cancel(oid)
         except Exception as e:
             LOG.warning("replace cancel failed %s: %s", oid[:20], e)
@@ -182,6 +197,16 @@ class OrderManager:
         while True:
             attempt += 1
             try:
+                LOG.info(
+                    "ORDER_REPOST_MS event=replace_post_attempt ts_ms=%d order_id=%s attempt=%d "
+                    "price=%.4f size=%.4f post_only=%s",
+                    _now_ms(),
+                    oid[:20],
+                    attempt,
+                    float(decision.new_price),
+                    float(sz),
+                    bool(post_only),
+                )
                 order_signed = client.create_order(
                     OrderArgs(
                         token_id=token_id,
@@ -193,7 +218,8 @@ class OrderManager:
                 )
                 client.post_order(order_signed, orderType=OrderType.GTC, post_only=post_only)
                 LOG.info(
-                    "Replace post succeeded for %s on attempt %d",
+                    "ORDER_REPOST_MS event=replace_post_success ts_ms=%d order_id=%s attempt=%d",
+                    _now_ms(),
                     oid[:20],
                     attempt,
                 )
@@ -207,7 +233,8 @@ class OrderManager:
             except Exception as e:
                 last_err = str(e)
                 LOG.warning(
-                    "replace post failed (attempt %d%s) %s: %s",
+                    "ORDER_REPOST_MS event=replace_post_failed ts_ms=%d attempt=%d%s order_id=%s: %s",
+                    _now_ms(),
                     attempt,
                     "" if unlimited else f"/{replace_post_max_retries}",
                     oid[:20],

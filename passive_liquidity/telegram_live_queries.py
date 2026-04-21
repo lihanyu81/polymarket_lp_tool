@@ -194,14 +194,19 @@ def get_live_order_summary(
     market_display: Optional[MarketDisplayResolver] = None,
     book_fetcher: Optional[OrderBookFetcher] = None,
     reward_monitor: Optional[RewardMonitor] = None,
+    orders: Optional[list[dict[str, Any]]] = None,
 ) -> Tuple[bool, str]:
-    try:
-        orders = order_manager.fetch_all_open_orders(client)
-    except Exception as e:
-        LOG.exception("live /orders: fetch failed: %s", e)
-        return False, f"查询失败: {e}"
+    src_orders: list[dict[str, Any]]
+    if orders is None:
+        try:
+            src_orders = order_manager.fetch_all_open_orders(client)
+        except Exception as e:
+            LOG.exception("live /orders: fetch failed: %s", e)
+            return False, f"查询失败: {e}"
+    else:
+        src_orders = [o for o in orders if isinstance(o, dict)]
 
-    n = len(orders)
+    n = len(src_orders)
     # 账号前缀由 Telegram send_command_reply 统一加，此处不再重复 [label]
     lines = [
         "实时挂单",
@@ -212,7 +217,7 @@ def get_live_order_summary(
         return True, "\n".join(lines)
 
     shown = 0
-    for o in orders:
+    for o in src_orders:
         if not isinstance(o, dict):
             continue
         oid = str(_oid(o) or "").strip()

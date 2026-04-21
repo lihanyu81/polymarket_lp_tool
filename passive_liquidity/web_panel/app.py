@@ -5,6 +5,8 @@ import hmac
 import logging
 import os
 import secrets
+import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
@@ -29,7 +31,6 @@ from passive_liquidity.orderbook_fetcher import resolve_effective_tick_size
 from passive_liquidity.simple_price_policy import classify_custom_tick_regime
 from passive_liquidity.telegram_live_queries import (
     get_live_account_status,
-    get_live_order_summary,
     get_live_pnl,
 )
 from passive_liquidity.web_panel.context import WebPanelContext
@@ -38,6 +39,8 @@ from passive_liquidity.web_panel.orders_data import orders_as_rows
 LOG = logging.getLogger(__name__)
 
 _ctx: Optional[WebPanelContext] = None
+_page_cache: dict[str, tuple[float, Any]] = {}
+_page_cache_lock = threading.Lock()
 
 
 def _project_root() -> Path:
@@ -69,6 +72,52 @@ def _rules_form_redirect_url() -> str:
     if (request.form.get("redirect") or "").strip() == "orders":
         return url_for("orders_page")
     return url_for("rules_page")
+
+
+def _cache_get_or_compute(key: str, ttl_sec: float, producer: Any) -> Any:
+    now = time.monotonic()
+    with _page_cache_lock:
+        cached = _page_cache.get(key)
+        if cached is not None:
+            ts, value = cached
+            if now - ts <= max(0.0, float(ttl_sec)):
+                return value
+    value = producer()
+    with _page_cache_lock:
+        _page_cache[key] = (time.monotonic(), value)
+    return value
+
+
+def _cache_invalidate(prefix: str = "") -> None:
+    with _page_cache_lock:
+        if not prefix:
+            _page_cache.clear()
+            return
+        for k in list(_page_cache.keys()):
+            if k.startswith(prefix):
+                _page_cache.pop(k, None)
+
+
+def _orders_summary_text_from_rows(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "实时挂单",
+        f"未成交单总数: {len(rows)}",
+    ]
+    if not rows:
+        lines.append("（当前无挂单）")
+        return "\n".join(lines)
+    for idx, r in enumerate(rows, start=1):
+        oid = str(r.get("order_id") or "")
+        lines.append(f"{idx}) 盘口: {str(r.get('market_title') or '（未知盘口）')}")
+        lines.append(f"   order_id={oid}")
+        lines.append(
+            "   side={side}  price={price}  size={size}".format(
+                side=str(r.get("side") or "?"),
+                price=r.get("price"),
+                size=r.get("size"),
+            )
+        )
+    return "\n".join(lines)
 
 
 def _custom_rule_defaults_payload(ctx: WebPanelContext) -> dict[str, Any]:
@@ -137,11 +186,15 @@ def create_app() -> Flask:
     @app.route("/")
     def index() -> str:
         ctx = get_ctx()
-        ok, body = get_live_account_status(
-            client=ctx.client,
-            order_manager=ctx.order_manager,
-            funder=ctx.funder,
-            account_label=ctx.account_label,
+        ok, body = _cache_get_or_compute(
+            "index:status",
+            5.0,
+            lambda: get_live_account_status(
+                client=ctx.client,
+                order_manager=ctx.order_manager,
+                funder=ctx.funder,
+                account_label=ctx.account_label,
+            ),
         )
         lines = body.split("\n") if ok else []
         return render_template(
@@ -155,19 +208,10 @@ def create_app() -> Flask:
     @app.route("/orders")
     def orders_page() -> str:
         ctx = get_ctx()
-        rows = orders_as_rows(
-            client=ctx.client,
-            order_manager=ctx.order_manager,
-            market_display=ctx.market_display,
-            book_fetcher=ctx.book_fetcher,
-            reward_monitor=ctx.reward_monitor,
-        )
-        ok, text_body = get_live_order_summary(
-            client=ctx.client,
-            order_manager=ctx.order_manager,
-            market_display=ctx.market_display,
-            book_fetcher=ctx.book_fetcher,
-            reward_monitor=ctx.reward_monitor,
+        rows, ok, text_body = _cache_get_or_compute(
+            "orders:page",
+            2.0,
+            lambda: _build_orders_page_data(ctx),
         )
         return render_template(
             "orders.html",
@@ -213,11 +257,15 @@ def create_app() -> Flask:
     @app.route("/pnl")
     def pnl_page() -> str:
         ctx = get_ctx()
-        ok, body = get_live_pnl(
-            client=ctx.client,
-            order_manager=ctx.order_manager,
-            funder=ctx.funder,
-            account_label=ctx.account_label,
+        ok, body = _cache_get_or_compute(
+            "pnl:live",
+            5.0,
+            lambda: get_live_pnl(
+                client=ctx.client,
+                order_manager=ctx.order_manager,
+                funder=ctx.funder,
+                account_label=ctx.account_label,
+            ),
         )
         lines = body.split("\n") if ok else []
         return render_template(
@@ -236,6 +284,7 @@ def create_app() -> Flask:
         ctx = get_ctx()
         try:
             ctx.client.cancel(oid)
+            _cache_invalidate()
             flash(f"已提交取消: {oid[:24]}…", "ok")
         except Exception as e:
             LOG.warning("web cancel failed: %s", e)
@@ -264,6 +313,7 @@ def create_app() -> Flask:
         if total == 0:
             flash("当前无挂单。", "ok")
         elif failed == 0:
+            _cache_invalidate()
             flash(f"已提交取消全部 {total} 笔。", "ok")
         else:
             flash(f"部分失败: 成功 {total - failed}/{total}。", "error")
@@ -324,6 +374,7 @@ def create_app() -> Flask:
             flash(f"参数无效: {e}", "error")
             return redirect(back)
         ctx.rules_store.set_rule(token_id, side, rule)
+        _cache_invalidate()
         flash(f"已保存规则 {stable_rule_key(token_id, side)}", "ok")
         return redirect(back)
 
@@ -337,12 +388,28 @@ def create_app() -> Flask:
             flash("token_id 与 side 必填", "error")
             return redirect(back)
         if ctx.rules_store.clear_rule(token_id, side):
+            _cache_invalidate()
             flash("已删除规则", "ok")
         else:
             flash("无此规则", "error")
         return redirect(back)
 
     return app
+
+
+def _build_orders_page_data(ctx: WebPanelContext) -> tuple[list[dict[str, Any]], bool, str]:
+    orders = ctx.order_manager.fetch_all_open_orders(ctx.client)
+    rows = orders_as_rows(
+        client=ctx.client,
+        order_manager=ctx.order_manager,
+        market_display=ctx.market_display,
+        book_fetcher=ctx.book_fetcher,
+        reward_monitor=ctx.reward_monitor,
+        orders=orders,
+    )
+    ok = True
+    text_body = _orders_summary_text_from_rows(rows)
+    return rows, ok, text_body
 
 
 def main() -> None:

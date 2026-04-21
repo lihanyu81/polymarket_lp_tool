@@ -69,6 +69,10 @@ from passive_liquidity.telegram_notifier import (
 LOG = logging.getLogger("main_loop")
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 def _order_display_meta(order: dict) -> tuple[str, str]:
     title = str(
         order.get("question")
@@ -900,6 +904,18 @@ def main() -> None:
                     if mid is None:
                         LOG.warning("No mid for token %s; skip order %s", token_id[:24], oid[:16])
                         continue
+                    LOG.info(
+                        "PRICE_CHECK_MS event=price_check ts_ms=%d condition_id=%s token_id=%s "
+                        "order_id=%s side=%s order_price=%.4f mid=%.4f tick=%.4f",
+                        _now_ms(),
+                        condition_id[:20],
+                        token_id[:28],
+                        oid[:18],
+                        _side(o),
+                        _price(o),
+                        mid,
+                        float(book.tick_size or 0.01),
+                    )
 
                     inventory = inv_by_token[token_id]
                     side = _side(o)
