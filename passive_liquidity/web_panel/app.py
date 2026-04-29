@@ -11,6 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
+from py_clob_client_v2.clob_types import OrderPayload
 from flask import (
     Flask,
     flash,
@@ -27,7 +28,10 @@ from passive_liquidity.custom_pricing_rules_store import (
     StoredCustomRule,
     stable_rule_key,
 )
-from passive_liquidity.orderbook_fetcher import resolve_effective_tick_size
+from passive_liquidity.orderbook_fetcher import (
+    pricing_tick_for_order_like_main_loop,
+    resolve_effective_tick_size,
+)
 from passive_liquidity.simple_price_policy import classify_custom_tick_regime
 from passive_liquidity.telegram_live_queries import (
     get_live_account_status,
@@ -227,6 +231,13 @@ def create_app() -> Flask:
         side = (request.args.get("side") or "").strip().upper()
         if not token_id or side not in ("BUY", "SELL"):
             return jsonify({"error": "token_id 与 side(BUY/SELL) 必填"}), 400
+        order_price: Optional[float] = None
+        raw_order_price = (request.args.get("order_price") or "").strip()
+        if raw_order_price:
+            try:
+                order_price = float(raw_order_price)
+            except ValueError:
+                order_price = None
         ctx = get_ctx()
         rule = ctx.rules_store.get_rule(token_id, side)
         suggested: Optional[str] = None
@@ -235,7 +246,16 @@ def create_app() -> Flask:
             book = ctx.book_fetcher.get_orderbook(token_id)
             t = max(float(book.tick_size or 0.01), 1e-12)
             t_eff = resolve_effective_tick_size(book.tick_size, book.bids, book.asks)
-            effective_tick = max(float(t_eff or t), 1e-12)
+            if order_price is not None:
+                t_used = pricing_tick_for_order_like_main_loop(
+                    book_tick_size=book.tick_size,
+                    bids=book.bids,
+                    asks=book.asks,
+                    order_price=float(order_price),
+                )
+            else:
+                t_used = float(t_eff or t)
+            effective_tick = max(float(t_used), 1e-12)
             suggested = classify_custom_tick_regime(effective_tick)
         except Exception:
             pass
@@ -283,7 +303,7 @@ def create_app() -> Flask:
             return redirect(url_for("orders_page"))
         ctx = get_ctx()
         try:
-            ctx.client.cancel(oid)
+            ctx.client.cancel_order(OrderPayload(orderID=oid))
             _cache_invalidate()
             flash(f"已提交取消: {oid[:24]}…", "ok")
         except Exception as e:
@@ -307,7 +327,7 @@ def create_app() -> Flask:
                 continue
             total += 1
             try:
-                ctx.client.cancel(oi)
+                ctx.client.cancel_order(OrderPayload(orderID=oi))
             except Exception:
                 failed += 1
         if total == 0:

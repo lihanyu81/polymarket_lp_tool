@@ -1,5 +1,7 @@
 # Polymarket Order Monitoring (Liquidity Rewards)
 
+[中文](README.md) | [English](README_EN.md)
+
 Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.com/api-reference/introduction) 前端**手动挂单**，本程序**不会新建订单**，只轮询该 API 密钥下的**未成交订单**，按**订单簿 + 激励半宽 δ** 的**简化规则**做 **保持 / 撤单 / 同量改价重挂**。
 
 这不是自动做市机器人。

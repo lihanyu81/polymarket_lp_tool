@@ -41,8 +41,8 @@ def main() -> int:
     config = PassiveConfig.from_env()
     client = build_trading_client(config.clob_host, config.chain_id)
 
-    from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
-    from py_clob_client.order_builder.constants import BUY, SELL
+    from py_clob_client_v2.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
+    from py_clob_client_v2.order_builder.constants import BUY, SELL
 
     side_const = BUY if args.side == "BUY" else SELL
     post_only = not args.not_post_only
@@ -67,7 +67,7 @@ def main() -> int:
         return 0
 
     try:
-        resp = client.post_order(signed, orderType=OrderType.GTC, post_only=post_only)
+        resp = client.post_order(signed, order_type=OrderType.GTC, post_only=post_only)
     except Exception as e:
         print("post_order failed:", e, file=sys.stderr)
         return 1

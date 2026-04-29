@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
+from py_clob_client_v2.clob_types import OrderPayload
 from passive_liquidity.custom_pricing_rules_store import CustomPricingRulesStore
 from passive_liquidity.order_manager import OrderManager
 from passive_liquidity.orderbook_fetcher import OrderBookFetcher
@@ -216,7 +217,7 @@ def _poll_loop(
                                         continue
                                     total += 1
                                     try:
-                                        client.cancel(oid)
+                                        client.cancel_order(OrderPayload(orderID=oid))
                                     except Exception:
                                         failed += 1
                                 if total == 0:
@@ -228,7 +229,7 @@ def _poll_loop(
                         else:
                             oid = arg
                             try:
-                                client.cancel(oid)
+                                client.cancel_order(OrderPayload(orderID=oid))
                                 ok, body = True, f"已提交取消订单: {oid[:48]}…"
                             except Exception as e:
                                 ok, body = False, f"取消失败: {e}"

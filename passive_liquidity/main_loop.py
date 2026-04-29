@@ -209,7 +209,7 @@ def main() -> None:
 
     client = build_trading_client(config.clob_host, config.chain_id)
 
-    from py_clob_client.client import ClobClient
+    from py_clob_client_v2 import ClobClient
 
     ro_client = ClobClient(config.clob_host, chain_id=config.chain_id)
 

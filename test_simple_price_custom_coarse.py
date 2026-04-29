@@ -8,6 +8,7 @@ from passive_liquidity.simple_price_policy import (
     CustomPricingSettings,
     _decide_custom_coarse,
     _ticks_from_mid_into_band,
+    list_coarse_reward_tick_levels,
 )
 
 
@@ -20,6 +21,17 @@ def _asks(*prices: float) -> list[dict]:
 
 
 class TestCustomCoarseOffset(unittest.TestCase):
+    def test_coarse_theory_levels_display(self) -> None:
+        lo, hi, lv = list_coarse_reward_tick_levels(
+            side="BUY",
+            mid=0.6650,
+            delta=0.0350,
+            tick=0.01,
+        )
+        self.assertAlmostEqual(lo, 0.6350, places=6)
+        self.assertAlmostEqual(hi, 0.6650, places=6)
+        self.assertEqual(lv, [0.64, 0.65, 0.66])
+
     def test_ticks_from_mid_grid_stable(self) -> None:
         self.assertEqual(_ticks_from_mid_into_band("BUY", 0.16, 0.15, 0.01), 1)
         self.assertEqual(_ticks_from_mid_into_band("BUY", 0.16, 0.16, 0.01), 0)

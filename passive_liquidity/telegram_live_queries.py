@@ -38,6 +38,7 @@ from passive_liquidity.simple_price_policy import (
     fine_reward_display_lo_hi,
     fine_tick_display_decimals,
     list_coarse_reward_book_candidates,
+    list_coarse_reward_tick_levels,
 )
 
 LOG = logging.getLogger(__name__)
@@ -271,17 +272,24 @@ def get_live_order_summary(
                             book.bids,
                             book.asks,
                         )
+                        _, _, theory_lv = list_coarse_reward_tick_levels(
+                            str(su).upper(),
+                            float(rr.mid),
+                            float(rr.delta),
+                            t_reward,
+                        )
+                        dec = fine_tick_display_decimals(t_reward)
+                        theory_s = ",".join(f"{p:.{dec}f}" for p in theory_lv)
                         if book_lv:
-                            dec = fine_tick_display_decimals(t_reward)
                             levels_s = ",".join(f"{p:.{dec}f}" for p in book_lv)
                             lines.append(
                                 f"   可得奖励档位({str(su).upper()})簿上≈[{levels_s}]"
-                                f"（扫描[{lo:.4f},{hi:.4f}] mid={rr.mid:.4f}, δ={rr.delta:.4f}, tick={t_reward:.4f}）"
+                                f"（理论档位≈[{theory_s}] 扫描[{lo:.4f},{hi:.4f}] mid={rr.mid:.4f}, δ={rr.delta:.4f}, tick={t_reward:.4f}）"
                             )
                         else:
                             lines.append(
-                                f"   奖励扫描≈[{lo:.4f}, {hi:.4f}] 簿上无同侧正深度档位"
-                                f"（mid={rr.mid:.4f}, δ={rr.delta:.4f}）"
+                                f"   奖励理论档位({str(su).upper()})≈[{theory_s}]；簿上无同侧正深度档位"
+                                f"（扫描[{lo:.4f}, {hi:.4f}] mid={rr.mid:.4f}, δ={rr.delta:.4f}）"
                             )
                     else:
                         side_fine = (

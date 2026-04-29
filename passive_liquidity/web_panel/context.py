@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from py_clob_client.client import ClobClient
+from py_clob_client_v2 import ClobClient
 
 from passive_liquidity.clob_factory import build_trading_client, funder_address
 from passive_liquidity.config_manager import PassiveConfig

@@ -79,7 +79,7 @@ class RewardMonitor:
 
     def batch_order_scoring(self, client: Any, order_ids: list[str]) -> dict[str, bool]:
         """Map order_id -> scoring bool; missing ids treated False."""
-        from py_clob_client.clob_types import OrdersScoringParams
+        from py_clob_client_v2.clob_types import OrdersScoringParams
 
         out: dict[str, bool] = {}
         if not order_ids:
@@ -98,13 +98,13 @@ class RewardMonitor:
         return out
 
     def get_scoring_status(self, client: Any, condition_id: str, token_id: str) -> ScoringStatus:
-        from py_clob_client.clob_types import OpenOrderParams, OrdersScoringParams
+        from py_clob_client_v2.clob_types import OpenOrderParams, OrdersScoringParams
 
         try:
             params = OpenOrderParams(market=condition_id, asset_id=token_id)
-            open_orders = client.get_orders(params)
+            open_orders = client.get_open_orders(params)
         except Exception as e:
-            LOG.warning("get_orders failed for %s: %s", token_id[:16], e)
+            LOG.warning("get_open_orders failed for %s: %s", token_id[:16], e)
             return ScoringStatus(False, False, 0.0, 0, {})
 
         ids: list[str] = []

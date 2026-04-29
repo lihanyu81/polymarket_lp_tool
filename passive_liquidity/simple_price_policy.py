@@ -203,6 +203,37 @@ def list_coarse_reward_book_candidates(
     return lo_c, hi_c, ordered
 
 
+def list_coarse_reward_tick_levels(
+    side: str,
+    mid: float,
+    delta: float,
+    tick: float,
+) -> tuple[float, float, list[float]]:
+    """
+    Coarse regime theoretical tick ladder inside reward half-band.
+
+    Returns (scan_lo, scan_hi_clipped, tick-aligned price levels ascending).
+    Example: mid=0.6650, delta=0.0350, tick=0.01 -> [0.64, 0.65, 0.66].
+    """
+    side_u = str(side).strip().upper()
+    lo, hi, _, _ = _coarse_reward_scan_range(side_u, float(mid), float(delta), tick)
+    t = max(float(tick), 1e-12)
+    lo_c = max(float(lo), 1e-12)
+    hi_c = min(float(hi), 1.0 - 1e-12)
+    if lo_c > hi_c + 1e-15:
+        return lo_c, hi_c, []
+
+    k_lo = int(math.ceil(lo_c / t - 1e-9))
+    k_hi = int(math.floor(hi_c / t + 1e-9))
+    if k_hi < k_lo:
+        return lo_c, hi_c, []
+
+    levels = [max(t, min(1.0 - t, k * t)) for k in range(k_lo, k_hi + 1)]
+    # De-duplicate after clipping near boundaries (0/1).
+    uniq = sorted({round(float(p), 12) for p in levels})
+    return lo_c, hi_c, uniq
+
+
 def fine_tick_display_decimals(tick: float) -> int:
     """Print width for outcome prices: 0.01 grid -> 2 decimals, 0.001 -> 3."""
     return 2 if float(tick) >= 0.009 else 3

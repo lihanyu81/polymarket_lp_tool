@@ -45,7 +45,7 @@
           <td>
             <div class="order-actions-row">
               {% if r.token_id and r.side in ('BUY', 'SELL') %}
-              <button type="button" class="btn btn-compact" data-open-order-rule data-token-id="{{ r.token_id }}" data-side="{{ r.side }}">自定义规则</button>
+              <button type="button" class="btn btn-compact" data-open-order-rule data-token-id="{{ r.token_id }}" data-side="{{ r.side }}" data-order-price="{{ r.price }}">自定义规则</button>
               {% endif %}
               <form class="inline" method="post" action="{{ url_for('cancel_order') }}" onsubmit="return confirm('取消该笔订单？');">
                 <input type="hidden" name="order_id" value="{{ r.order_id }}">
@@ -173,6 +173,7 @@
     btn.addEventListener('click', function () {
       var tokenId = btn.getAttribute('data-token-id') || '';
       var side = btn.getAttribute('data-side') || '';
+      var orderPrice = btn.getAttribute('data-order-price') || '';
       inpToken.value = tokenId;
       inpSideH.value = side;
       delTok.value = tokenId;
@@ -183,6 +184,7 @@
       var u = new URL('{{ url_for("api_order_custom_rule") }}', window.location.origin);
       u.searchParams.set('token_id', tokenId);
       u.searchParams.set('side', side);
+      if (orderPrice) u.searchParams.set('order_price', orderPrice);
       fetch(u.toString())
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {

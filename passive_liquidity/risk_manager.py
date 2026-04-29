@@ -79,7 +79,7 @@ class RiskManager:
         return result
 
     def fetch_trades_for_token(self, client: Any, token_id: str) -> list[dict]:
-        from py_clob_client.clob_types import TradeParams
+        from py_clob_client_v2.clob_types import TradeParams
 
         try:
             raw = client.get_trades(TradeParams(asset_id=token_id))

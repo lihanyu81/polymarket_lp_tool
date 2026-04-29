@@ -1,5 +1,5 @@
-# Pin to current PyPI release; see https://github.com/Polymarket/py-clob-client
-py-clob-client==0.34.6
+# CLOB V2 SDK (V1 package no longer works on production).
+py-clob-client-v2
 websockets>=12.0
 python-dotenv>=1.0.0
 flask>=3.0.0

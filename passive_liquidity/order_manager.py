@@ -59,12 +59,12 @@ class OrderManager:
         self._tol = tick_tolerance_mult
 
     def fetch_all_open_orders(self, client: Any) -> list[dict]:
-        from py_clob_client.clob_types import OpenOrderParams
+        from py_clob_client_v2.clob_types import OpenOrderParams
 
         try:
-            raw_list = client.get_orders(OpenOrderParams())
+            raw_list = client.get_open_orders(OpenOrderParams())
         except Exception as e:
-            LOG.error("fetch_all_open_orders get_orders failed: %s", e)
+            LOG.error("fetch_all_open_orders get_open_orders failed: %s", e)
             raise
         return [o for o in raw_list if isinstance(o, dict)]
 
@@ -81,8 +81,13 @@ class OrderManager:
         on_replace_post_retry: Optional[Callable[[int, str], None]] = None,
         replace_size: Optional[float] = None,
     ) -> ApplyDecisionResult:
-        from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client_v2.clob_types import (
+            OrderArgs,
+            OrderPayload,
+            OrderType,
+            PartialCreateOrderOptions,
+        )
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
 
         oid = _oid(order)
         if not oid:
@@ -108,7 +113,7 @@ class OrderManager:
                     oid[:20],
                     decision.reason,
                 )
-                client.cancel(oid)
+                client.cancel_order(OrderPayload(orderID=oid))
                 return ApplyDecisionResult(
                     "canceled_ok",
                     old_price=old_p,
@@ -171,7 +176,7 @@ class OrderManager:
                 oid[:20],
                 decision.reason,
             )
-            client.cancel(oid)
+            client.cancel_order(OrderPayload(orderID=oid))
         except Exception as e:
             LOG.warning("replace cancel failed %s: %s", oid[:20], e)
             return ApplyDecisionResult(
@@ -216,7 +221,11 @@ class OrderManager:
                     ),
                     PartialCreateOrderOptions(),
                 )
-                client.post_order(order_signed, orderType=OrderType.GTC, post_only=post_only)
+                client.post_order(
+                    order_signed,
+                    order_type=OrderType.GTC,
+                    post_only=post_only,
+                )
                 LOG.info(
                     "ORDER_REPOST_MS event=replace_post_success ts_ms=%d order_id=%s attempt=%d",
                     _now_ms(),
@@ -274,14 +283,21 @@ class OrderManager:
         plan: QuotePlan,
         tick_size: float,
     ) -> None:
-        from py_clob_client.clob_types import OpenOrderParams, OrderArgs, OrderType, PartialCreateOrderOptions
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client_v2.clob_types import (
+            OpenOrderParams,
+            OrderArgs,
+            OrderMarketCancelParams,
+            OrderPayload,
+            OrderType,
+            PartialCreateOrderOptions,
+        )
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
 
         params = OpenOrderParams(market=condition_id, asset_id=token_id)
         try:
-            raw_list = client.get_orders(params)
+            raw_list = client.get_open_orders(params)
         except Exception as e:
-            LOG.error("sync_orders get_orders failed: %s", e)
+            LOG.error("sync_orders get_open_orders failed: %s", e)
             raise
 
         open_orders: list[dict] = [o for o in raw_list if isinstance(o, dict)]
@@ -289,7 +305,9 @@ class OrderManager:
         if plan.skip_reason:
             if open_orders:
                 LOG.warning("Canceling all on %s (%s): %s", token_id[:20], condition_id[:12], plan.skip_reason)
-                client.cancel_market_orders(market=condition_id, asset_id=token_id)
+                client.cancel_market_orders(
+                    OrderMarketCancelParams(market=condition_id, asset_id=token_id)
+                )
             return
 
         thr = max(tick_size * self._tol, 1e-9)
@@ -301,7 +319,7 @@ class OrderManager:
                     oid = _oid(o)
                     if oid:
                         LOG.info("Cancel %s %s", side, oid[:16])
-                        client.cancel(oid)
+                        client.cancel_order(OrderPayload(orderID=oid))
                 return
             keep_id: Optional[str] = None
             for o in same:
@@ -313,14 +331,14 @@ class OrderManager:
                     oid = _oid(o)
                     if oid and oid != keep_id:
                         LOG.info("Cancel duplicate %s %s", side, oid[:16])
-                        client.cancel(oid)
+                        client.cancel_order(OrderPayload(orderID=oid))
                 LOG.debug("Keep %s order %s @ %.4f", side, keep_id[:16], desired)
                 return
             for o in same:
                 oid = _oid(o)
                 if oid:
                     LOG.info("Cancel stale %s %s price=%.4f (want %.4f)", side, oid[:16], _price(o), desired)
-                    client.cancel(oid)
+                    client.cancel_order(OrderPayload(orderID=oid))
             LOG.info("Post %s %.4f size=%.4f post_only=%s", side, desired, plan.size, plan.post_only)
             order = client.create_order(
                 OrderArgs(
@@ -331,7 +349,7 @@ class OrderManager:
                 ),
                 PartialCreateOrderOptions(),
             )
-            client.post_order(order, orderType=OrderType.GTC, post_only=plan.post_only)
+            client.post_order(order, order_type=OrderType.GTC, post_only=plan.post_only)
 
         keep_or_replace("BUY", plan.bid_price)
         keep_or_replace("SELL", plan.ask_price)
